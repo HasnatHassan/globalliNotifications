@@ -8,6 +8,8 @@ export const preferencesUpdateSchema = z
   .strict()
   .refine((v) => Object.keys(v).length > 0, "At least one category is required");
 
+export const readStateSchema = z.object({ read: z.boolean() }).strict();
+
 const id = z.number().int().positive();
 
 /** Simulated platform events accepted by POST /api/events (occurredAt is set server-side). */

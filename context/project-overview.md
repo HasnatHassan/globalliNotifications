@@ -67,6 +67,9 @@ easy it is to extend and defend, not production infrastructure.
 - In-app channel only (per the brief). Clients: console mock
   (CLI demo) and WebSocket (browser demo).
 - In-memory inbox per player for history and offline catch-up.
+- Read/unread state per notification (mark read, mark unread, mark
+  all read) with an unread count. It is stored server-side and
+  synced across a player's open connections.
 
 ## Scope
 

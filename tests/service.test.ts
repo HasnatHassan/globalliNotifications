@@ -75,14 +75,22 @@ describe("NotificationService", () => {
 });
 
 describe("InMemoryNotificationRepository", () => {
-  it("returns newest first, honours limit, caps per player and marks read", async () => {
+  it("returns newest first, honours limit, caps per player and tracks read state", async () => {
     const { repository, service } = setup();
     for (let level = 2; level <= 5; level++) await service.handle({ ...levelUp, newLevel: level });
     expect(repository.listFor(1, 2).map((n) => n.metadata.level)).toEqual([5, 4]);
+    expect(repository.unreadCount(1)).toBe(4);
+
     const [latest] = repository.listFor(1);
-    expect(repository.markAsRead(1, latest!.id)).toBe(true);
-    expect(repository.listFor(1)[0]!.read).toBe(true);
-    expect(repository.markAsRead(1, "nope")).toBe(false);
+    expect(repository.setRead(1, latest!.id, true)?.read).toBe(true);
+    expect(repository.unreadCount(1)).toBe(3);
+    expect(repository.setRead(1, latest!.id, false)?.read).toBe(false);
+    expect(repository.setRead(1, "nope", true)).toBeUndefined();
+    expect(repository.setRead(2, latest!.id, true)).toBeUndefined(); // another player's inbox
+
+    expect(repository.markAllAsRead(1)).toBe(4);
+    expect(repository.unreadCount(1)).toBe(0);
+    expect(repository.markAllAsRead(1)).toBe(0);
 
     const capped = new InMemoryNotificationRepository(2);
     for (const n of repository.listFor(1)) capped.save(n);

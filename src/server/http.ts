@@ -3,7 +3,14 @@ import { fileURLToPath } from "node:url";
 import { ZodError } from "zod";
 import type { NotificationSystem } from "../composition.js";
 import type { Logger } from "../logger.js";
-import { playerIdSchema, preferencesUpdateSchema, simulateEventSchema, type SimulateEventInput } from "./schemas.js";
+import type { PlayerId } from "../domain/types.js";
+import {
+  playerIdSchema,
+  preferencesUpdateSchema,
+  readStateSchema,
+  simulateEventSchema,
+  type SimulateEventInput,
+} from "./schemas.js";
 
 const PUBLIC_DIR = fileURLToPath(new URL("../../public", import.meta.url));
 
@@ -49,11 +56,17 @@ function referencedPlayerIds(e: SimulateEventInput): number[] {
     .map(([, v]) => v as number);
 }
 
+export interface HttpAppOptions {
+  /** Pushes a message to the player's open connections (keeps read state in sync across tabs). */
+  notifyPlayer?: (playerId: PlayerId, message: unknown) => void;
+}
+
 /**
  * Thin HTTP adapter for the demo: parse → call producer/store → shape response.
  * No notification rules live here.
  */
-export function createHttpApp(system: NotificationSystem, logger: Logger) {
+export function createHttpApp(system: NotificationSystem, logger: Logger, options: HttpAppOptions = {}) {
+  const notifyPlayer = options.notifyPlayer ?? (() => {});
   const { players, items, preferences, repository } = system;
   const app = express();
   app.use(express.json({ limit: "10kb" }));
@@ -91,12 +104,27 @@ export function createHttpApp(system: NotificationSystem, logger: Logger) {
     route((req, res) => res.json({ data: repository.listFor(playerParam(req)).map((n) => n.toJSON()) })),
   );
 
-  app.post(
-    "/api/players/:id/notifications/:notificationId/read",
+  // Read state: { read: true } marks as read, { read: false } marks as unread.
+  app.patch(
+    "/api/players/:id/notifications/:notificationId",
     route((req, res) => {
-      const ok = repository.markAsRead(playerParam(req), String(req.params.notificationId));
-      if (!ok) throw new HttpError(404, "Notification not found");
-      res.json({ data: { read: true } });
+      const id = playerParam(req);
+      const { read } = readStateSchema.parse(req.body);
+      const updated = repository.setRead(id, String(req.params.notificationId), read);
+      if (!updated) throw new HttpError(404, "Notification not found");
+      const unread = repository.unreadCount(id);
+      notifyPlayer(id, { type: "read-state", data: { ids: [updated.id], read, unread } });
+      res.json({ data: { notification: updated.toJSON(), unread } });
+    }),
+  );
+
+  app.post(
+    "/api/players/:id/notifications/read-all",
+    route((req, res) => {
+      const id = playerParam(req);
+      const updated = repository.markAllAsRead(id);
+      notifyPlayer(id, { type: "read-state", data: { all: true, read: true, unread: 0 } });
+      res.json({ data: { updated, unread: 0 } });
     }),
   );
 

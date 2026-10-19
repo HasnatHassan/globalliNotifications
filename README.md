@@ -23,7 +23,7 @@ Requires **Node.js 20+** (developed on Node 25; `.nvmrc` pins 22).
 ```bash
 npm install
 npm run build
-npm test          # 32 unit + integration tests
+npm test          # 33 unit + integration tests
 npm run demo      # CLI walkthrough of the brief's example triggers
 npm start         # live demo → http://localhost:3000  (PORT=xxxx to change)
 ```
@@ -66,6 +66,12 @@ Open http://localhost:3000. The page shows two players side by side
 - The **Game / Social** toggles change that player's preferences.
   Turn Social off for Alice and send another friend request: the
   activity log shows it as *suppressed*, and nothing reaches her feed.
+- **Read / unread.** New notifications are highlighted with a dot,
+  and each pane shows an unread badge. Click a notification to mark
+  it read, use its **Mark read / Mark unread** button to toggle it,
+  or press **Mark all read**. Read state is stored on the server, so
+  it survives a reload and stays in sync when two panes show the
+  same player.
 - **Reload** the page: each feed is rebuilt from the player's inbox.
   Notifications sent while a player was offline are not lost.
 
@@ -83,7 +89,7 @@ Seed data: players `1 Alice`, `2 Bob`, `3 Cara`, `4 Dan`. Items
 | Social events       | Friend request · Friend request accepted · New follower                                                 |
 | Preferences         | Per player, per category (`GAME`, `SOCIAL`) on/off map, opted in by default                             |
 | Real-time delivery  | WebSocket push to every open connection of the recipient (multi-tab/device)                             |
-| Inbox               | Per-player history (capped), replayed on connect, mark-as-read endpoint                                 |
+| Inbox               | Per-player history (capped), replayed on connect, read/unread state, unread count, mark all read        |
 | Robustness          | One failing channel/handler never blocks others; dead sockets are dropped by heartbeat                  |
 | Input validation    | zod schemas on every HTTP body/param and the WS `userId`                                                 |
 | Tests               | Formatters, preferences, service gating and error isolation, event bus, end to end, HTTP + WS           |
@@ -150,9 +156,10 @@ context/           spec files the AI worked from (see docs/AI_USAGE.md)
 | `GET /api/players/:id/preferences`                  | Category preferences                               |
 | `PUT /api/players/:id/preferences`                  | Partial update, e.g. `{ "SOCIAL": false }`         |
 | `GET /api/players/:id/notifications`                | Inbox, newest first                                |
-| `POST /api/players/:id/notifications/:nid/read`     | Mark as read                                       |
+| `PATCH /api/players/:id/notifications/:nid`         | Set read state: `{ "read": true }` or `{ "read": false }` |
+| `POST /api/players/:id/notifications/read-all`      | Mark every notification as read                    |
 | `POST /api/events`                                  | Simulate an event, e.g. `{ "type": "PLAYER_LEVELED_UP", "playerId": 1, "newLevel": 15 }` |
-| `WS /ws?userId=1`                                   | Receives `welcome` (inbox), `notification`, `activity` messages |
+| `WS /ws?userId=1`                                   | Receives `welcome` (inbox + unread count), `notification`, `read-state`, `activity` messages |
 
 Responses use `{ data }` on success and `{ error: { message, details? } }`
 on failure.
@@ -186,5 +193,3 @@ on failure.
   implementation, plus [`CLAUDE.md`](CLAUDE.md).
 
 ---
-
-Author: Hasnat Hassan · [github.com/HasnatHassan](https://github.com/HasnatHassan)

@@ -28,10 +28,17 @@ Update this file after every meaningful implementation change.
   sockets, heartbeat, inbox replay), activity feed, demo page
 - Unit 7: README, `docs/DESIGN.md`, `docs/AI_USAGE.md`; dependency
   upgrades (0 audit findings)
+- Unit 8: Read/unread notifications. `Notification.markAsUnread`;
+  repository `setRead`, `markAllAsRead`, `unreadCount`;
+  `PATCH /api/players/:id/notifications/:nid` `{ read }` and
+  `POST …/notifications/read-all` (replace the old
+  `POST …/:nid/read`); `read-state` WS message syncs other tabs; the
+  demo page has an unread highlight, a per-item toggle,
+  click-to-read, an unread badge and "Mark all read".
 
-Status: 32 tests passing, `tsc` strict clean, `npm run demo` and
-`npm start` verified (the API was smoke-tested with curl; the page
-script was syntax-checked).
+Status: 33 tests passing, `tsc` strict clean, `npm run demo` and
+`npm start` verified; the browser demo was checked manually end to
+end.
 
 ## In Progress
 
@@ -39,7 +46,7 @@ script was syntax-checked).
 
 ## Next Up
 
-- Manually check the browser demo end to end.
+- None.
 
 ## Open Questions
 
@@ -73,6 +80,9 @@ assumption is documented in the README.
   wiring stays explicit.
 - **Preference gate before persistence.** Disabled means not stored
   and not sent.
+- **Read state lives on the server, not in the client.** It
+  survives reloads, and the hub pushes `read-state` to the player's
+  other connections, so multiple tabs or devices agree.
 - **WebSocket hub configured through `attach(server, { isKnownPlayer, welcome })`.**
   Avoids a construction cycle between the hub and the notification
   system.

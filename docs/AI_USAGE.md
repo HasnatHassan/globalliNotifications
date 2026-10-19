@@ -29,7 +29,7 @@ Requirements (PDF brief)
 3. Unit 0: fill the six context files (the specs) + CLAUDE.md, before any code
    │
    ▼
-4. Units 1–7, one at a time: implement → typecheck → test → run → update tracker → commit
+4. Units 1–8, one at a time: implement → typecheck → test → run → update tracker → commit
    │
    ▼
 5. Review passes: refactor smells, enforce standards, dependency audit, docs
@@ -57,14 +57,26 @@ attached, what counts as "rare", and default preferences.
 
 ## Prompts used
 
-**1. Kick-off prompt** (with the six template files attached):
+**1. Kick-off prompt** (sent with the six context templates and the
+full challenge brief):
 
-> complete this assessment, i want to use 6 files system approach like
-> having a context dir in it like a gave you the files as well as
-> claude.md and readme file to have a complete grip and understanding of
-> the project. i will give you the scenario and the requirements in the
-> assessment you can start working on it properly as a senior full stack
-> dev and make a proper plan for this: *[full challenge brief pasted]*
+> Act as a senior full-stack engineer and take this coding challenge
+> from requirements to a working, defensible solution.
+>
+> Use a spec-driven workflow built on six context files. I've attached
+> templates for `project-overview.md`, `architecture.md`,
+> `code-standards.md`, `ui-context.md`, `ai-workflow-rules.md` and
+> `progress-tracker.md`. Fill them in for this project in a `context/`
+> directory, and add a `CLAUDE.md` and a `README.md`, so that anyone
+> picking the project up, human or agent, has complete context on the
+> scope, architecture, standards and current state.
+>
+> The scenario and requirements are below. Before writing any code,
+> analyse them, raise any decisions that need my input, and propose an
+> implementation plan for me to review.
+>
+> *[Challenge brief: scenario, technical requirements, example event
+> triggers, scope note]*
 
 **2. Clarifying questions the agent asked** (answers chosen by the
 developer):
@@ -79,6 +91,16 @@ layout, the event → bus → service → formatter → preference → inbox →
 channel → client pipeline, 8 units, and verification steps. The
 developer approved it before any file outside the plan was written.
 
+**4. Follow-up feature prompt** (after reviewing the live demo):
+
+> The live demo doesn't let players manage read state. Add support for
+> marking notifications as read and unread, and surface it in the demo
+> UI.
+
+The agent treated this as a new unit. It updated the context files
+first, then implemented the feature across the domain, repository,
+API, WebSocket layer and demo page, with tests (see Unit 8 below).
+
 ## What the agent did per unit
 
 | Unit | Output                                                                  | Verified by                                    |
@@ -88,6 +110,7 @@ developer approved it before any file outside the plan was written.
 | 5    | Event bus, producers, CLI demo                                          | `npm run demo` output matches the brief's wording |
 | 6    | Express + WebSocket server, hub, demo page                              | HTTP + WS integration tests, curl smoke test   |
 | 7    | README, DESIGN.md, this file                                            | Review                                         |
+| 8    | Read/unread: `setRead`, `markAllAsRead`, unread count, `PATCH …/notifications/:nid`, `read-state` sync across tabs, demo UI | 33 tests, curl smoke test |
 
 ## Corrections made during review
 

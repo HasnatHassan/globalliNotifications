@@ -31,7 +31,9 @@ export async function startServer(port: number, logger: Logger = consoleLogger):
     });
   });
 
-  const server = createHttpServer(createHttpApp(system, logger));
+  const server = createHttpServer(
+    createHttpApp(system, logger, { notifyPlayer: (id, message) => void hub.sendTo(id, message) }),
+  );
   // Catch-up on connect: the client gets its inbox, so nothing sent while offline is lost.
   hub.attach(server, {
     isKnownPlayer: (id) => system.players.exists(id),
@@ -40,6 +42,7 @@ export async function startServer(port: number, logger: Logger = consoleLogger):
       data: {
         player: { id, name: system.players.nameOf(id) },
         history: system.repository.listFor(id).map((n) => n.toJSON()),
+        unread: system.repository.unreadCount(id),
       },
     }),
   });

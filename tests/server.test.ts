@@ -16,11 +16,13 @@ const post = (path: string, body: unknown) =>
   fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 const put = (path: string, body: unknown) =>
   fetch(`${base}${path}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+const patch = (path: string, body: unknown) =>
+  fetch(`${base}${path}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 
 const json = async <T>(res: Response) => (await res.json()) as T;
 
 interface WsMessage {
-  type: "welcome" | "notification" | "activity";
+  type: "welcome" | "notification" | "activity" | "read-state";
   data: Record<string, unknown>;
 }
 
@@ -104,9 +106,35 @@ describe("real-time delivery over WebSocket", () => {
       "Player 'Bob' started following you.",
     ]);
 
-    const inbox = await json<{ data: { id: string }[] }>(await fetch(`${base}/api/players/3/notifications`));
-    const id = inbox.data[0]!.id;
-    expect((await post(`/api/players/3/notifications/${id}/read`, {})).status).toBe(200);
+    expect(welcome.data.unread).toBe(1);
     cara.ws.close();
+  });
+
+  it("marks notifications read/unread and syncs read state to the player's sockets", async () => {
+    await post("/api/events", { type: "PLAYER_LEVELED_UP", playerId: 4, newLevel: 2 });
+    await post("/api/events", { type: "PLAYER_LEVELED_UP", playerId: 4, newLevel: 3 });
+    const dan = await connect(4);
+    await dan.waitFor((m) => m.type === "welcome");
+
+    const inbox = await json<{ data: { id: string; read: boolean }[] }>(await fetch(`${base}/api/players/4/notifications`));
+    const id = inbox.data[0]!.id;
+
+    const read = await json<{ data: { notification: { read: boolean }; unread: number } }>(
+      await patch(`/api/players/4/notifications/${id}`, { read: true }),
+    );
+    expect(read.data).toMatchObject({ notification: { read: true }, unread: 1 });
+    const sync = await dan.waitFor((m) => m.type === "read-state");
+    expect(sync.data).toMatchObject({ ids: [id], read: true, unread: 1 });
+
+    const unread = await json<{ data: { unread: number } }>(await patch(`/api/players/4/notifications/${id}`, { read: false }));
+    expect(unread.data.unread).toBe(2);
+
+    const all = await json<{ data: { updated: number; unread: number } }>(await post("/api/players/4/notifications/read-all", {}));
+    expect(all.data).toEqual({ updated: 2, unread: 0 });
+
+    expect((await patch(`/api/players/4/notifications/${id}`, { read: "yes" })).status).toBe(400);
+    expect((await patch(`/api/players/4/notifications/missing`, { read: true })).status).toBe(404);
+    expect((await patch(`/api/players/1/notifications/${id}`, { read: true })).status).toBe(404); // not Alice's
+    dan.ws.close();
   });
 });

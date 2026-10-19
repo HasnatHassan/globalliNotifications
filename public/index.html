@@ -9,6 +9,7 @@
     --bg-base: #0d0f14;
     --bg-surface: #161a22;
     --bg-raised: #1f2430;
+    --bg-unread: #262046;
     --text-primary: #e8ebf2;
     --text-muted: #8b93a7;
     --accent-primary: #7c5cff;
@@ -65,8 +66,21 @@
   .note { display: grid; grid-template-columns: 28px 1fr; gap: 8px; padding: 10px 12px; background: var(--bg-raised);
     border-radius: var(--radius-sm); border-left: 3px solid var(--cat-game); animation: slide .25s ease-out; }
   .note.SOCIAL { border-left-color: var(--cat-social); }
-  .note.read { opacity: .6; }
+  .note { position: relative; grid-template-columns: 28px 1fr auto; cursor: pointer; }
+  .note.unread { background: var(--bg-unread); }
+  .note.unread .title::after { content: ""; display: inline-block; width: 7px; height: 7px; margin-left: 6px;
+    border-radius: 50%; background: var(--accent-primary); vertical-align: middle; }
+  .note.read { opacity: .55; }
   .note .icon { font-size: 18px; line-height: 1.2; }
+  .note .read-toggle { align-self: start; background: transparent; border: 1px solid var(--border-default);
+    color: var(--text-muted); font-size: 11px; font-weight: 500; padding: 3px 8px; white-space: nowrap; }
+  .note .read-toggle:hover { color: var(--text-primary); border-color: var(--text-muted); }
+  .feed-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .badge { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-muted); }
+  .badge b { min-width: 20px; padding: 1px 7px; border-radius: 999px; text-align: center;
+    background: var(--accent-primary); color: var(--text-primary); font-size: 11px; }
+  .badge b.zero { background: var(--bg-raised); color: var(--text-muted); }
+  .feed-head button { font-size: 12px; padding: 4px 10px; }
   .note .title { font-weight: 600; font-size: 13px; }
   .note .meta { font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); }
   @keyframes slide { from { transform: translateY(-6px); opacity: 0; } to { transform: none; opacity: 1; } }
@@ -116,6 +130,10 @@
       <span class="status"><span class="dot"></span><span class="status-text">offline</span></span>
     </div>
     <div class="toggles"></div>
+    <div class="feed-head">
+      <span class="badge"><b class="unread-count zero">0</b> unread</span>
+      <button type="button" class="secondary mark-all">Mark all read</button>
+    </div>
     <ul class="feed" aria-live="polite"></ul>
   </section>
 </template>
@@ -219,7 +237,9 @@ class PlayerPane {
     this.root = root;
     this.isActivitySource = isActivitySource;
     this.socket = null;
+    this.items = new Map(); // notification id → { n, li }
     this.select = $(".player-select", root);
+    $(".mark-all", root).addEventListener("click", () => this.markAllRead());
     for (const p of state.players) this.select.append(el("option", { value: p.id, text: `${p.id} · ${p.name}` }));
     this.select.value = String(initialPlayerId);
     this.select.addEventListener("change", () => this.connect());
@@ -256,16 +276,72 @@ class PlayerPane {
   }
 
   renderNotification(n, prepend = true) {
-    const item = el("li", { class: `note ${n.category}${n.read ? " read" : ""}` },
+    const toggle = el("button", { type: "button", class: "read-toggle" });
+    const item = el("li", { class: `note ${n.category}` },
       el("span", { class: "icon", "aria-hidden": "true", text: ICONS[n.type] ?? "🔔" }),
       el("div", {},
         el("div", { class: "title", text: n.title }),
         el("div", { text: n.message }),
         el("div", { class: "meta", text: `${n.category} · ${new Date(n.createdAt).toLocaleTimeString()}` }),
       ),
+      toggle,
     );
+    // Clicking a notification opens it, which marks it as read. The button toggles either way.
+    item.addEventListener("click", () => { if (!n.read) this.setRead(n.id, true); });
+    toggle.addEventListener("click", (e) => { e.stopPropagation(); this.setRead(n.id, !n.read); });
+
+    this.items.set(n.id, { n, li: item });
+    this.applyReadState(n.id, n.read);
     const feed = $(".feed", this.root);
     prepend ? feed.prepend(item) : feed.append(item);
+  }
+
+  applyReadState(id, read) {
+    const entry = this.items.get(id);
+    if (!entry) return;
+    entry.n.read = read;
+    entry.li.classList.toggle("read", read);
+    entry.li.classList.toggle("unread", !read);
+    const toggle = $(".read-toggle", entry.li);
+    toggle.textContent = read ? "Mark unread" : "Mark read";
+    toggle.setAttribute("aria-label", `${toggle.textContent}: ${entry.n.title}`);
+  }
+
+  setUnreadCount(count) {
+    const badge = $(".unread-count", this.root);
+    badge.textContent = String(count);
+    badge.classList.toggle("zero", count === 0);
+    $(".mark-all", this.root).disabled = count === 0;
+  }
+
+  recountUnread() {
+    this.setUnreadCount([...this.items.values()].filter(({ n }) => !n.read).length);
+  }
+
+  async setRead(id, read) {
+    const previous = this.items.get(id)?.n.read;
+    this.applyReadState(id, read); // optimistic; the server confirms with the authoritative count
+    this.recountUnread();
+    try {
+      const { unread } = await api(`/api/players/${this.playerId}/notifications/${encodeURIComponent(id)}`, {
+        method: "PATCH", body: JSON.stringify({ read }),
+      });
+      this.setUnreadCount(unread);
+    } catch (err) {
+      this.applyReadState(id, previous);
+      this.recountUnread();
+      setHint(err.message, true);
+    }
+  }
+
+  async markAllRead() {
+    try {
+      await api(`/api/players/${this.playerId}/notifications/read-all`, { method: "POST" });
+      for (const id of this.items.keys()) this.applyReadState(id, true);
+      this.setUnreadCount(0);
+    } catch (err) {
+      setHint(err.message, true);
+    }
   }
 
   connect() {
@@ -274,6 +350,8 @@ class PlayerPane {
       this.socket.close();
     }
     $(".feed", this.root).replaceChildren();
+    this.items.clear();
+    this.setUnreadCount(0);
     this.setStatus(false);
     this.renderPreferences().catch((err) => setHint(err.message, true));
 
@@ -287,8 +365,20 @@ class PlayerPane {
     };
     socket.onmessage = (msg) => {
       const { type, data } = JSON.parse(msg.data);
-      if (type === "welcome") data.history.forEach((n) => this.renderNotification(n, false));
-      if (type === "notification") this.renderNotification(data);
+      if (type === "welcome") {
+        data.history.forEach((n) => this.renderNotification(n, false));
+        this.setUnreadCount(data.unread);
+      }
+      if (type === "notification") {
+        this.renderNotification(data);
+        this.recountUnread();
+      }
+      if (type === "read-state") {
+        // Another tab/pane for the same player changed read state; mirror it.
+        const ids = data.all ? [...this.items.keys()] : data.ids;
+        ids.forEach((id) => this.applyReadState(id, data.read));
+        this.setUnreadCount(data.unread);
+      }
       if (type === "activity" && this.isActivitySource) renderActivity(data);
     };
   }

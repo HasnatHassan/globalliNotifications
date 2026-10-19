@@ -10,6 +10,8 @@ describe("Notification", () => {
     expect(n.read).toBe(false);
     n.markAsRead();
     expect(n.toJSON()).toMatchObject({ userId: 1, type: "LEVEL_UP", category: "GAME", metadata: {}, read: true });
+    n.markAsUnread();
+    expect(n.read).toBe(false);
     expect(typeof n.toJSON().createdAt).toBe("string");
   });
 });

@@ -6,7 +6,11 @@ export interface NotificationRepository {
   save(notification: Notification): void;
   /** Newest first. */
   listFor(playerId: PlayerId, limit?: number): Notification[];
-  markAsRead(playerId: PlayerId, notificationId: string): boolean;
+  /** Returns the updated notification, or undefined if the player has no such notification. */
+  setRead(playerId: PlayerId, notificationId: string, read: boolean): Notification | undefined;
+  /** Marks every notification in the player's inbox as read and returns how many changed. */
+  markAllAsRead(playerId: PlayerId): number;
+  unreadCount(playerId: PlayerId): number;
 }
 
 export class InMemoryNotificationRepository implements NotificationRepository {
@@ -26,10 +30,21 @@ export class InMemoryNotificationRepository implements NotificationRepository {
     return (this.#inbox.get(playerId) ?? []).slice(-limit).reverse();
   }
 
-  markAsRead(playerId: PlayerId, notificationId: string): boolean {
+  setRead(playerId: PlayerId, notificationId: string, read: boolean): Notification | undefined {
     const n = this.#inbox.get(playerId)?.find((x) => x.id === notificationId);
-    if (!n) return false;
-    n.markAsRead();
-    return true;
+    if (!n) return undefined;
+    if (read) n.markAsRead();
+    else n.markAsUnread();
+    return n;
+  }
+
+  markAllAsRead(playerId: PlayerId): number {
+    const unread = (this.#inbox.get(playerId) ?? []).filter((n) => !n.read);
+    unread.forEach((n) => n.markAsRead());
+    return unread.length;
+  }
+
+  unreadCount(playerId: PlayerId): number {
+    return (this.#inbox.get(playerId) ?? []).filter((n) => !n.read).length;
   }
 }

@@ -71,6 +71,10 @@ export class Notification {
     this.#read = true;
   }
 
+  markAsUnread(): void {
+    this.#read = false;
+  }
+
   toJSON(): NotificationDTO {
     return {
       id: this.id,
