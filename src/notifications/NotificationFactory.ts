@@ -1,18 +1,14 @@
 import type { DomainEvent, EventOfType, EventType } from "../domain/events.js";
 import { Notification } from "../domain/Notification.js";
-import {
-  challengeCompletedFormatter,
-  itemAcquiredFormatter,
-  levelUpFormatter,
-  playerAttackedFormatter,
-  playerDefeatedFormatter,
-} from "./formatters/gameFormatters.js";
+import { challengeCompletedFormatter } from "./formatters/challengeCompleted.js";
+import { friendAcceptedFormatter } from "./formatters/friendAccepted.js";
+import { friendRequestFormatter } from "./formatters/friendRequest.js";
+import { itemAcquiredFormatter } from "./formatters/itemAcquired.js";
+import { levelUpFormatter } from "./formatters/levelUp.js";
+import { newFollowerFormatter } from "./formatters/newFollower.js";
 import type { FormatterContext, NotificationFormatter } from "./formatters/NotificationFormatter.js";
-import {
-  friendAcceptedFormatter,
-  friendRequestFormatter,
-  newFollowerFormatter,
-} from "./formatters/socialFormatters.js";
+import { playerAttackedFormatter } from "./formatters/playerAttacked.js";
+import { playerDefeatedFormatter } from "./formatters/playerDefeated.js";
 
 /** One formatter per event type. A missing entry is a compile error. */
 export type FormatterRegistry = { [K in EventType]: NotificationFormatter<EventOfType<K>> };
@@ -41,18 +37,18 @@ export class NotificationFactory {
     const formatter = this.formatters[event.type] as NotificationFormatter<DomainEvent>;
     return formatter.format(event, this.ctx).map(
       (draft) =>
-        new Notification(
-          {
-            userId: draft.recipientId,
-            type: draft.type,
-            category: formatter.category,
-            title: draft.title,
-            message: draft.message,
-            ...(draft.metadata ? { metadata: draft.metadata } : {}),
-          },
-          undefined,
-          event.occurredAt,
-        ),
+        new Notification({
+          // Deterministic id: a redelivered event maps to the same notification,
+          // which lets the repository reject the duplicate.
+          id: `${event.id}:${draft.type}:${draft.recipientId}`,
+          userId: draft.recipientId,
+          type: draft.type,
+          category: formatter.category,
+          title: draft.title,
+          message: draft.message,
+          createdAt: event.occurredAt,
+          ...(draft.metadata ? { metadata: draft.metadata } : {}),
+        }),
     );
   }
 }

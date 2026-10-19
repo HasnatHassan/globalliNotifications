@@ -17,8 +17,11 @@ easy it is to extend and defend, not production infrastructure.
    for the correct recipient, with the wording the brief asks for.
 2. A player who disabled a category (Game / Social) gets no
    notifications from that category.
-3. Adding a new event type means adding one formatter and
-   registering it. The pipeline and the producers stay unchanged.
+3. Adding a new event type is a small, compiler-guided change: the
+   event type, its schema, one formatter file and its registry entry
+   (missing schema or registry entries fail to compile), plus a
+   producer method if a subsystem needs a new call. The service,
+   preferences, inbox and channels stay unchanged.
 4. A reviewer can clone, `npm install && npm run build`, then run
    `npm run demo` (CLI) or `npm start` (live browser demo).
 
@@ -26,16 +29,21 @@ easy it is to extend and defend, not production infrastructure.
 
 1. A game subsystem calls a producer method, for example
    `gameEngine.playerLeveledUp(1, 15)`.
-2. The producer publishes a typed domain event on the event bus.
-3. `NotificationService` receives the event and looks up the
+2. The producer validates the input (shape, and that every referenced
+   player and item exists), stamps an event id and time, and publishes
+   a typed domain event on the event bus. Invalid input rejects the
+   call and nothing is published.
+3. `NotificationService` receives the event, re-applies the same
+   reference check (as a guard for any publisher), and looks up the
    formatter registered for that event type.
 4. The formatter decides the recipients and builds a
    `Notification` (or skips it, for example for a common item).
 5. The service checks the recipient's preferences for the
    notification's category. A disabled category means the
    notification is suppressed and counted.
-6. An allowed notification is saved to the recipient's inbox and
-   sent through every channel (in-app → `NotificationClient`).
+6. An allowed notification is saved to the recipient's inbox (a
+   redelivered event is ignored) and sent through every channel
+   (in-app → `NotificationClient`).
 7. The client (console mock or WebSocket) delivers it to the
    player in real time. Offline players see it in their inbox
    history when they next connect.
@@ -47,7 +55,7 @@ easy it is to extend and defend, not production infrastructure.
 - Level Up: "Congratulations! You've reached level 15!"
 - Item Acquired (rare, epic or legendary only):
   "You've acquired the legendary Sword of Azeroth!"
-- Challenge Completed: "Challenge complete: Dragon Slayer!"
+- Challenge Completed: "You've completed the challenge 'Dragon Slayer'!"
 - PvP (optional in the brief, included): attacked / defeated by
   another player. The victim is notified.
 
@@ -60,13 +68,14 @@ easy it is to extend and defend, not production infrastructure.
 ### Preferences
 
 - Per player, per category on/off map (`GAME`, `SOCIAL`).
-- Players are opted in by default.
+- Every category is enabled until the player turns it off.
 
 ### Delivery
 
 - In-app channel only (per the brief). Clients: console mock
   (CLI demo) and WebSocket (browser demo).
-- In-memory inbox per player for history and offline catch-up.
+- In-memory inbox per player for history and offline catch-up,
+  keeping the latest 100 (older ones are dropped, read or not).
 - Read/unread state per notification (mark read, mark unread, mark
   all read) with an unread count. It is stored server-side and
   synced across a player's open connections.
@@ -75,12 +84,14 @@ easy it is to extend and defend, not production infrastructure.
 
 ### In Scope
 
-- Event capture, notification creation, preference check, dispatch.
+- **Core:** event validation and capture, notification creation,
+  preference check, inbox, dispatch.
 - Simulated `GameEngine` and `SocialSystem` producers using the
   brief's method names.
 - CLI demo, unit and integration tests.
-- A small HTTP + WebSocket server and a one-page browser client
-  for a live demo.
+- **Demo harness (optional, isolated in `src/server` and
+  `public/`):** a small HTTP + WebSocket server and a one-page client
+  that make real-time delivery visible. The core never depends on it.
 
 ### Out of Scope
 

@@ -1,4 +1,4 @@
-import type { NotificationClient } from "../clients/NotificationClient.js";
+import type { DeliveryStatus, NotificationClient } from "../clients/NotificationClient.js";
 import type { Notification } from "../domain/Notification.js";
 import type { NotificationChannel } from "./NotificationChannel.js";
 
@@ -8,7 +8,7 @@ export class InAppChannel implements NotificationChannel {
 
   constructor(private readonly client: NotificationClient) {}
 
-  async send(notification: Notification): Promise<void> {
-    await this.client.deliver(notification);
+  async send(notification: Notification): Promise<DeliveryStatus> {
+    return this.client.deliver(notification);
   }
 }

@@ -29,11 +29,25 @@ Requirements (PDF brief)
 3. Unit 0: fill the six context files (the specs) + CLAUDE.md, before any code
    │
    ▼
-4. Units 1–8, one at a time: implement → typecheck → test → run → update tracker → commit
+4. Units 1–9, one at a time: implement → typecheck → test → run → update tracker
    │
    ▼
-5. Review passes: refactor smells, enforce standards, dependency audit, docs
+5. Two review rounds by a separate AI session against the brief → Units 10 and 11
 ```
+
+### How this maps to the git history
+
+Units were built and verified one at a time, but **commits were made
+in batches, not per unit**. The per-unit trail is in
+`context/progress-tracker.md`, not in git:
+
+| Commit                     | Contains                                                  |
+| -------------------------- | --------------------------------------------------------- |
+| Core pipeline, CLI demo    | Units 0–5: each verified (typecheck, tests, demo) before the next, committed together at the end |
+| Server and demo page       | Unit 6 (the optional demo harness, added after the core was complete) |
+| Docs                       | Unit 7                                                    |
+| Two feature commits        | Units 8–9 (read/unread, demo page fixes)                  |
+| Hardening                  | Units 10–12 (review rounds and the audit), committed together |
 
 ### The six context files
 
@@ -101,27 +115,117 @@ The agent treated this as a new unit. It updated the context files
 first, then implemented the feature across the domain, repository,
 API, WebSocket layer and demo page, with tests (see Unit 8 below).
 
+**5. Defect investigation prompt** (after using the demo):
+
+> Players sometimes appear to receive duplicate notifications, or
+> notifications for actions they didn't trigger. Investigate the root
+> cause end to end, from the server to the client, before changing
+> anything.
+
+The agent checked the running server's inbox data first. Every event
+had produced exactly one notification, so the server was not at
+fault. The repeats came from the same trigger being fired twice. The
+agent then fixed what made the page misleading (Unit 9) and added a
+regression test for exactly-once delivery per connection.
+
+**6. Code review remediation prompt, round 1** (with the full review attached):
+
+> I reviewed the codebase against the brief and found a set of
+> concrete issues: crash paths, broken failure isolation, missing
+> core validation, interfaces that don't support the claims made
+> about them, a privacy leak in the activity feed, inconsistent inbox
+> accounting, and docs that contradict the code. Fix them properly
+> and precisely, prioritising correctness and keeping the changes
+> efficient.
+
+**7. Code review remediation prompt, round 2** (with the second
+review and the challenge PDF attached):
+
+> Check the code against the attached brief and the second review.
+> Fix the remaining issues properly. I'll handle committing and
+> pushing myself.
+
+**8. Defect report and strict audit prompt** (with a browser console
+error attached):
+
+> The live demo throws `TypeError: offline is not iterable` in the
+> console. Find the cause, and audit the whole codebase strictly
+> against the brief.
+
+The agent traced the error to a server process started before the
+latest build: the page is served from disk, the server from `dist/`.
+It made `npm start` and `npm run demo` rebuild first, and made the
+page tolerate missing fields. The audit also found that the brief's
+fire-and-forget calling style (`gameEngine.playerLeveledUp(1, 15);`)
+would crash the process on invalid input, because producers returned
+a rejected promise. Producers now throw synchronously (Unit 12).
+
 ## What the agent did per unit
 
-| Unit | Output                                                                  | Verified by                                    |
-| ---- | ----------------------------------------------------------------------- | ---------------------------------------------- |
-| 0    | Scaffold, strict tsconfig, six context files, CLAUDE.md                 | `npm run build`                                |
-| 1–4  | Domain, catalogs, preferences, formatters, factory, service, channels   | `tsc`, 27 unit/integration tests               |
+| Unit | Output                                                                  | Verified by                                       |
+| ---- | ----------------------------------------------------------------------- | ------------------------------------------------- |
+| 0    | Scaffold, strict tsconfig, six context files, CLAUDE.md                 | `npm run build`                                   |
+| 1–4  | Domain, catalogs, preferences, formatters, factory, service, channels   | `tsc`, unit tests                                 |
 | 5    | Event bus, producers, CLI demo                                          | `npm run demo` output matches the brief's wording |
-| 6    | Express + WebSocket server, hub, demo page                              | HTTP + WS integration tests, curl smoke test   |
-| 7    | README, DESIGN.md, this file                                            | Review                                         |
-| 8    | Read/unread: `setRead`, `markAllAsRead`, unread count, `PATCH …/notifications/:nid`, `read-state` sync across tabs, demo UI | 33 tests, curl smoke test |
+| 6    | Express + WebSocket server, hub, demo page                              | HTTP + WS integration tests, curl smoke test      |
+| 7    | README, DESIGN.md, this file                                            | Review                                            |
+| 8    | Read/unread state, read-all, cross-tab sync, demo UI                    | Integration tests, curl smoke test                |
+| 9    | Demo page fixes for apparent duplicates                                 | Inbox data from the running server, regression test |
+| 10   | Hardening from review round 1 (below)                                   | Tests for every reproduced bug, shuffled runs, smoke test |
+| 11   | Hardening from review round 2 (below)                                   | Tests for every reproduced bug, shuffled runs     |
+| 12   | Stale-build console error, synchronous producer validation              | Repro script, regression test, simulated fresh-clone `npm start` |
 
-## Corrections made during review
+## Code reviews and what changed
 
-The loop was not "generate once and ship". These changes came out of
-review passes against the context files:
+The developer had the codebase reviewed against the brief twice. Both
+reviews came from **a separate AI session, not a human reviewer**. It
+read the code and ran probe scripts against the build to reproduce
+each finding. The developer passed each review back as one
+remediation unit (prompts 6 and 7).
 
-- **Removed a dependency cycle hack.** The first server wiring
-  resolved the WebSocket hub lazily to break a hub ↔ notification
-  system cycle. It was refactored so the hub receives its
-  `isKnownPlayer` and `welcome` callbacks in `attach()`, which made
-  the construction order linear.
+### Round 1 (Unit 10)
+
+The review confirmed the core pipeline but reproduced real defects,
+mostly in the demo harness and in claims the docs made.
+
+| Finding                                                          | Fix                                                                                         |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| One malformed WebSocket frame crashed the server                 | `error` handlers on every socket and server; regression test sends an unmasked frame         |
+| A channel that throws synchronously skipped the others           | Channels called via `async` wrappers; a test with a synchronous throw                        |
+| "Sent" was reported even when every channel failed               | New `undelivered` outcome; `sent` means at least one channel accepted                         |
+| One throwing dispatch listener broke the others                  | Listeners isolated with try/catch                                                            |
+| Inbox cap (100), replay (50) and unread count disagreed          | One capacity for all three; the page trims to it                                             |
+| Oversized body → 500; any SyntaxError → "Malformed JSON"         | 413 / 400 mapped from body-parser error types                                                |
+| Producers accepted garbage (level -5, NaN, unknown players)      | Shared domain schemas validate in producers; service rejects unknown players                 |
+| `preferences.update(1, { GAME: undefined })` broke a preference  | `exactOptionalPropertyTypes` on, plus a runtime boolean guard                                |
+| Inbox handed out mutable stored objects; `listFor(id, 0)` = all  | Immutable `Notification`; limit ≤ 0 returns nothing                                          |
+| "Swap in a DB with one line" while ports were synchronous        | Store ports made async; the claim rewritten with what a DB adapter must add                  |
+| Bus contract only worked in-process                              | `publish` resolves on acceptance; ordered async dispatch; `drain()` only on the in-memory bus |
+| Player fields guessed from names ending in `Id`                  | Identified by schema identity (replaced in round 2 by an explicit map)                       |
+| Events had no ids, despite docs proposing id-based dedupe        | Event ids; idempotent saves keyed by `eventId:type:recipient`                                |
+| Activity feed broadcast to every player; no origin check         | Separate `/ws/activity`; cross-origin upgrades refused                                       |
+| Docs contradicted code (wording, counts, engines, rules)         | Docs rewritten to match; the pre-written Q&A removed                                         |
+| Tests: shared server state, sleeps, no failure-path coverage     | Fresh server per test, event-driven waits, one behavior per test                             |
+
+### Round 2 (Unit 11)
+
+| Finding                                                                 | Fix                                                                                              |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| A channel that never responds froze every later notification           | Per-channel send timeout (default 5 s): a hung channel counts as failed; end-to-end test         |
+| Offline players were counted as "sent"                                  | Clients report `delivered` / `recipient-offline`; new `offline` outcome                           |
+| Duplicate detection only covered the 100-notification inbox            | Separate dedupe window (10,000 ids) independent of inbox eviction; documented as a limit         |
+| Three validation behaviours (throw / silent drop / ignored item typo)  | One rule (`findUnknownReferences`) for players and items; producers reject at the call site (made synchronous in Unit 12); the service re-checks as a guard; HTTP maps errors only |
+| No per-notification isolation inside one event                          | Each notification processed in its own try/catch; new `failed` outcome; test with a failing preference store |
+| Player-field detection by schema identity was fragile                   | Explicit `EVENT_REFERENCES` map, typed against each event's fields                               |
+| Friend-accepted doesn't verify a prior request                          | Documented: the social system owns that state; the notification layer trusts its events          |
+| Git history didn't match the "commit per unit" claim                    | Workflow and history described as they actually happened (above)                                |
+| Docs called the review "independent"                                    | Stated plainly as a separate AI session                                                          |
+
+## Corrections the agent made during implementation
+
+These came from the agent's own passes against the context files,
+before the reviews:
+
 - **Removed `any` from tests** to satisfy `code-standards.md` (typed
   WS messages and a typed `json<T>()` helper).
 - **Removed a mutable "name ref" workaround** in the CLI demo.

@@ -27,14 +27,19 @@ npm run build      # tsc → dist/
 npm test           # vitest
 npm run typecheck  # src + tests
 npm run demo       # CLI walkthrough of the brief's event triggers
-npm start          # http://localhost:3000 live demo (PORT env to override)
+npm start          # demo harness at http://localhost:3000 (PORT, ACTIVITY_FEED=off)
 npm run dev        # server with tsx watch
 ```
 
 ## Key rules (summary — details in context/)
 
-- Producers only publish events. Only formatters know wording and
-  recipients.
-- Check preferences before persisting or sending.
-- Wire concrete classes only in `src/composition.ts`.
+- Producers validate (via `src/domain/eventSchemas.ts`) and publish
+  only. Only formatters know wording and recipients.
+- Reject events naming unknown players; check preferences before
+  persisting or sending.
+- Isolate every fan-out (channels, handlers, listeners) against
+  synchronous throws.
+- Instantiate concrete classes only in composition roots
+  (`src/composition.ts`, `src/server/createServer.ts`, `src/demo.ts`).
+- The core never imports from `src/server` (the demo harness).
 - ESM: relative imports end in `.js`.

@@ -2,17 +2,15 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { fileURLToPath } from "node:url";
 import { ZodError } from "zod";
 import type { NotificationSystem } from "../composition.js";
-import type { Logger } from "../logger.js";
+import { InvalidEventError, parseEventPayload, UnknownReferenceError } from "../domain/eventSchemas.js";
+import type { AnyEventPayload } from "../domain/events.js";
 import type { PlayerId } from "../domain/types.js";
-import {
-  playerIdSchema,
-  preferencesUpdateSchema,
-  readStateSchema,
-  simulateEventSchema,
-  type SimulateEventInput,
-} from "./schemas.js";
+import type { Logger } from "../logger.js";
+import type { CategoryPreferences } from "../preferences/PreferenceStore.js";
+import { playerIdSchema, preferencesUpdateSchema, readStateSchema } from "./schemas.js";
 
 const PUBLIC_DIR = fileURLToPath(new URL("../../public", import.meta.url));
+export const MAX_BODY_BYTES = 10 * 1024;
 
 class HttpError extends Error {
   constructor(
@@ -27,8 +25,9 @@ type Handler = (req: Request, res: Response) => unknown;
 const route = (fn: Handler) => (req: Request, res: Response, next: NextFunction) =>
   Promise.resolve(fn(req, res)).catch(next);
 
-/** Maps a validated request to the producer method a real game subsystem would call. */
-function emit({ gameEngine, socialSystem }: NotificationSystem, e: SimulateEventInput): Promise<void> {
+/** Maps a validated payload to the producer method a real game subsystem would call. */
+function emit({ gameEngine, socialSystem }: NotificationSystem, e: AnyEventPayload): Promise<void> {
+  // Producers throw synchronously on invalid input; the async route wrapper turns that into a 4xx.
   switch (e.type) {
     case "PLAYER_LEVELED_UP":
       return gameEngine.playerLeveledUp(e.playerId, e.newLevel);
@@ -49,11 +48,20 @@ function emit({ gameEngine, socialSystem }: NotificationSystem, e: SimulateEvent
   }
 }
 
-/** Every player id referenced by an event (fields ending in "Id", except itemId). */
-function referencedPlayerIds(e: SimulateEventInput): number[] {
-  return Object.entries(e)
-    .filter(([k, v]) => k.endsWith("Id") && k !== "itemId" && typeof v === "number")
-    .map(([, v]) => v as number);
+/** Errors raised by express.json() (body-parser) carry a `type`; map the client-caused ones. */
+function bodyParserError(err: unknown): HttpError | undefined {
+  if (typeof err !== "object" || err === null || !("type" in err)) return undefined;
+  switch (err.type) {
+    case "entity.too.large":
+      return new HttpError(413, `Request body exceeds ${MAX_BODY_BYTES} bytes`);
+    case "entity.parse.failed":
+      return new HttpError(400, "Malformed JSON body");
+    case "encoding.unsupported":
+    case "charset.unsupported":
+      return new HttpError(415, "Unsupported body encoding");
+    default:
+      return undefined;
+  }
 }
 
 export interface HttpAppOptions {
@@ -66,34 +74,34 @@ export interface HttpAppOptions {
  * No notification rules live here.
  */
 export function createHttpApp(system: NotificationSystem, logger: Logger, options: HttpAppOptions = {}) {
-  const notifyPlayer = options.notifyPlayer ?? (() => {});
   const { players, items, preferences, repository } = system;
+  const notifyPlayer = options.notifyPlayer ?? (() => {});
   const app = express();
-  app.use(express.json({ limit: "10kb" }));
+  app.disable("x-powered-by");
+  app.use(express.json({ limit: MAX_BODY_BYTES }));
   app.use(express.static(PUBLIC_DIR));
 
-  const playerParam = (req: Request): number => {
+  const playerParam = (req: Request): PlayerId => {
     const id = playerIdSchema.parse(req.params.id);
     if (!players.exists(id)) throw new HttpError(404, `Player ${id} not found`);
     return id;
   };
 
   app.get("/api/health", (_req, res) => res.json({ data: { status: "ok" } }));
-
   app.get("/api/players", (_req, res) => res.json({ data: players.list() }));
-
   app.get("/api/items", (_req, res) => res.json({ data: items.list() }));
 
   app.get(
     "/api/players/:id/preferences",
-    route((req, res) => res.json({ data: preferences.get(playerParam(req)) })),
+    route(async (req, res) => res.json({ data: await preferences.get(playerParam(req)) })),
   );
 
   app.put(
     "/api/players/:id/preferences",
-    route((req, res) => {
+    route(async (req, res) => {
       const id = playerParam(req);
-      const updated = preferences.update(id, preferencesUpdateSchema.parse(req.body));
+      const changes = preferencesUpdateSchema.parse(req.body) as Partial<CategoryPreferences>;
+      const updated = await preferences.update(id, changes);
       logger.info("Preferences updated", { playerId: id, ...updated });
       res.json({ data: updated });
     }),
@@ -101,18 +109,21 @@ export function createHttpApp(system: NotificationSystem, logger: Logger, option
 
   app.get(
     "/api/players/:id/notifications",
-    route((req, res) => res.json({ data: repository.listFor(playerParam(req)).map((n) => n.toJSON()) })),
+    route(async (req, res) => {
+      const inbox = await repository.listFor(playerParam(req));
+      res.json({ data: inbox.map((n) => n.toJSON()) });
+    }),
   );
 
   // Read state: { read: true } marks as read, { read: false } marks as unread.
   app.patch(
     "/api/players/:id/notifications/:notificationId",
-    route((req, res) => {
+    route(async (req, res) => {
       const id = playerParam(req);
       const { read } = readStateSchema.parse(req.body);
-      const updated = repository.setRead(id, String(req.params.notificationId), read);
+      const updated = await repository.setRead(id, String(req.params.notificationId), read);
       if (!updated) throw new HttpError(404, "Notification not found");
-      const unread = repository.unreadCount(id);
+      const unread = await repository.unreadCount(id);
       notifyPlayer(id, { type: "read-state", data: { ids: [updated.id], read, unread } });
       res.json({ data: { notification: updated.toJSON(), unread } });
     }),
@@ -120,38 +131,44 @@ export function createHttpApp(system: NotificationSystem, logger: Logger, option
 
   app.post(
     "/api/players/:id/notifications/read-all",
-    route((req, res) => {
+    route(async (req, res) => {
       const id = playerParam(req);
-      const updated = repository.markAllAsRead(id);
+      const updated = await repository.markAllAsRead(id);
       notifyPlayer(id, { type: "read-state", data: { all: true, read: true, unread: 0 } });
       res.json({ data: { updated, unread: 0 } });
     }),
   );
 
+  // Validation (shape and references) happens in the producers, exactly as for
+  // any other caller; this route only maps their errors to status codes.
+  // Accepted, not processed: the bus delivers asynchronously, so 202 is the honest status.
   app.post(
     "/api/events",
     route(async (req, res) => {
-      const event = simulateEventSchema.parse(req.body);
-      const unknown = referencedPlayerIds(event).filter((id) => !players.exists(id));
-      if (unknown.length > 0) throw new HttpError(400, `Unknown player id(s): ${unknown.join(", ")}`);
-      await emit(system, event);
-      res.status(202).json({ data: { accepted: true, type: event.type } });
+      const payload = parseEventPayload(req.body); // narrows the type for emit(); producers re-check
+      await emit(system, payload);
+      res.status(202).json({ data: { accepted: true, type: payload.type } });
     }),
   );
 
   app.use("/api", (_req, res) => res.status(404).json({ error: { message: "Not found" } }));
 
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    const known = err instanceof HttpError ? err : bodyParserError(err);
+    if (known) {
+      res.status(known.status).json({ error: { message: known.message } });
+      return;
+    }
+    if (err instanceof UnknownReferenceError) {
+      res.status(404).json({ error: { message: err.message, details: err.unknown } });
+      return;
+    }
+    if (err instanceof InvalidEventError) {
+      res.status(400).json({ error: { message: "Invalid event", details: err.issues } });
+      return;
+    }
     if (err instanceof ZodError) {
       res.status(400).json({ error: { message: "Invalid request", details: err.flatten() } });
-      return;
-    }
-    if (err instanceof HttpError) {
-      res.status(err.status).json({ error: { message: err.message } });
-      return;
-    }
-    if (err instanceof SyntaxError) {
-      res.status(400).json({ error: { message: "Malformed JSON body" } });
       return;
     }
     logger.error("Unhandled request error", { error: err instanceof Error ? err.message : String(err) });

@@ -2,89 +2,117 @@
 
 ## Stack
 
-| Layer      | Technology                 | Role                                          |
-| ---------- | -------------------------- | --------------------------------------------- |
-| Language   | TypeScript 5 (strict), ESM | Whole codebase                                |
-| Runtime    | Node.js ≥ 20               | CLI demo and server                           |
-| HTTP       | Express 4                  | Demo REST API + static page                   |
-| Real-time  | `ws` 8                     | Push notifications to connected game clients  |
-| Validation | zod 3                      | Validate HTTP / WebSocket input at the edge   |
-| Tests      | Vitest 4                   | Unit + integration tests                      |
-| UI         | Vanilla HTML/CSS/JS        | One demo page with no build step (`public/`)  |
+| Layer      | Technology                 | Role                                                   |
+| ---------- | -------------------------- | ------------------------------------------------------ |
+| Language   | TypeScript 5 (strict), ESM | Whole codebase                                         |
+| Runtime    | Node.js 20.19+ / 22.12+    | CLI demo and server                                    |
+| Validation | zod 3                      | Event payload schemas (domain) and HTTP input          |
+| HTTP       | Express 4                  | Demo harness REST API + static page                    |
+| Real-time  | `ws` 8                     | Demo harness push to connected clients                 |
+| Tests      | Vitest 4                   | Unit + integration tests                               |
+| UI         | Vanilla HTML/CSS/JS        | One demo page with no build step (`public/`)           |
 
 ## Pipeline
 
 ```
-Producer ──publish──▶ EventBus ──▶ NotificationService
-                                     │ 1. NotificationFactory → formatter for event.type
-                                     │ 2. formatter → [{recipient, Notification}] (or none)
-                                     │ 3. PreferenceStore.isEnabled(recipient, category)?
-                                     │ 4. NotificationRepository.save()
-                                     ▼ 5. every NotificationChannel.send()  (allSettled)
-                               InAppChannel ──▶ NotificationClient (console | websocket)
+Producer ── parseEventPayload + findUnknownReferences ── publish ──▶ EventBus
+          (invalid → throws synchronously at the call site, nothing published)      (accepts; dispatches async, in order)
+                                                                            │
+                                                                            ▼
+                                                  NotificationService.handle(event)
+   1. findUnknownReferences (same rule, guard for any publisher)   → rejected (UNKNOWN_REFERENCE)
+   2. NotificationFactory → formatter(event) → Notification[]      (id = eventId:type:recipient)
+   for each notification, in its own try/catch                       (throws → failed)
+   3. PreferenceStore.isEnabled(recipient, category)?   no → suppressed
+   4. NotificationRepository.save()                      false → duplicate
+   5. every NotificationChannel.send(), isolated + timeout:
+        any "delivered" → sent · any "recipient-offline" → offline · none succeeded → undelivered
+   6. dispatch listeners (isolated)
 ```
 
 ## System Boundaries
 
-- `src/domain` — `Notification` class, categories, the domain
-  event union. Pure types and values with no I/O and no imports
-  from other layers.
-- `src/catalog` — read-only reference data (player names, item
-  names and rarity). Formatters use it to build messages.
-- `src/preferences` — `PreferenceStore` port + in-memory adapter.
-- `src/notifications` — formatters (one per event type), the
-  factory (registry), the repository (inbox) and
-  `NotificationService` (the orchestrator). All business rules
+**Core** (the challenge deliverable):
+
+- `src/domain`: events, event schemas (`parseEventPayload`), the
+  explicit reference map (`EVENT_REFERENCES`,
+  `findUnknownReferences`), `Notification`, categories. Depends only
+  on zod.
+- `src/catalog`: `PlayerLookup` / `ItemLookup` ports and seed data.
+  Synchronous because this is cached reference data, not a store
+  the pipeline writes to.
+- `src/preferences`: `PreferenceStore` port (async) + in-memory
+  adapter.
+- `src/notifications`: formatters (one file per event type), factory
+  (registry), `NotificationRepository` port (async) + bounded
+  in-memory inbox, and `NotificationService`. All notification rules
   live here.
-- `src/channels` — `NotificationChannel` port + `InAppChannel`.
-- `src/clients` — `NotificationClient` port (external delivery
-  mechanism the brief tells us to mock) + console and WebSocket
-  adapters.
-- `src/events` — typed in-process `EventBus`.
-- `src/producers` — simulated `GameEngine` and `SocialSystem`.
-  They only publish events and know nothing about notifications.
-- `src/composition.ts` — the only place that wires concrete
-  classes together (manual dependency injection).
-- `src/server` — demo delivery layer. `http.ts` (Express routes,
-  zod-validated, calls producers and stores), `WebSocketHub.ts`
-  (player id → sockets, heartbeat, `welcome` replay of the inbox),
-  `schemas.ts`, and `createServer.ts` (server-side wiring plus the
-  activity feed). No business rules live here.
-- `src/logger.ts` — `Logger` port with console and silent
-  implementations.
-- `src/demo.ts` — CLI walkthrough of the brief's example triggers.
-- `public/` — static demo page.
+- `src/channels`: `NotificationChannel` port + `InAppChannel`.
+- `src/clients`: `NotificationClient` port (the external delivery
+  mechanism the brief says to mock) + console, recording and
+  WebSocket clients.
+- `src/events`: `EventBus` port + in-memory queue implementation.
+- `src/producers`: simulated `GameEngine` / `SocialSystem`. They
+  validate (shape and references) and publish, and know nothing
+  about notifications.
+- `src/composition.ts`: core composition root. It returns
+  `NotificationSystem`, which exposes ports only.
+
+**Demo harness** (optional, depends on the core, never the reverse):
+
+- `src/server`: `http.ts` (routes), `WebSocketHub.ts` (player
+  sockets, heartbeat, inbox replay with buffering), `ActivityFeed.ts`
+  (operator socket), `createServer.ts` (server composition root,
+  upgrade routing, origin check), `index.ts` (process entry).
+- `public/`: demo page.
+- `src/demo.ts`: CLI composition root and walkthrough.
 
 ## Storage Model
 
-- **In-memory `Map`s only** (the brief allows a simple map).
-  - Preferences: `Map<PlayerId, Record<Category, boolean>>`.
-  - Inbox: `Map<PlayerId, Notification[]>`, newest last, capped
-    per player.
-  - Catalogs: static seed data.
-- Every store sits behind an interface, so a Postgres/Redis
-  adapter is a new class plus one line in `composition.ts`.
+- In-memory adapters behind async ports:
+  - Preferences: `Map<PlayerId, Record<Category, boolean>>`. Only
+    boolean values for known categories are stored.
+  - Inbox: `Map<PlayerId, Notification[]>`, a FIFO capped at
+    `INBOX_CAPACITY` (100). Listing, replay and unread count all
+    cover the same window. `save` is idempotent by notification id
+    over a separate window of the last `DEDUPE_WINDOW` (10,000) ids,
+    independent of inbox eviction.
+- `Notification` is immutable. Read-state changes replace the stored
+  value, so a reference held elsewhere cannot alter stored state.
+- A database adapter implements the same async interfaces and is
+  wired in `composition.ts`. What it adds and the in-memory version
+  does not handle (transactions, retries, pagination) is listed in
+  `docs/DESIGN.md`.
 
 ## Auth and Access Model
 
-- No authentication (out of scope). The demo client connects with
-  `/ws?userId=<id>`, and the server checks that the id exists in
-  `PlayerDirectory`.
-- A socket only receives notifications addressed to its own player.
-- In production the player id would come from a verified session
-  token, never from the query string.
+- No authentication (out of scope). The harness takes `userId` on
+  connect and checks that the player exists. Acceptable for a local
+  demo only.
+- WebSocket upgrades carrying a foreign `Origin` are refused (403),
+  so other web pages cannot read a player's stream. Clients without
+  an `Origin` header (non-browser) are allowed.
+- A player socket receives only that player's notifications and
+  read-state changes. Dispatch outcomes go only to `/ws/activity`,
+  which is an operator feed (behind admin auth, or absent, in
+  production).
 
 ## Invariants
 
 1. Producers never import from `notifications`, `channels` or
-   `clients`. They only publish events.
-2. The preference check happens before persistence and before any
-   channel is called. A suppressed notification is never stored or
+   `clients`. They validate and publish only.
+2. One reference rule (`findUnknownReferences`, players and items).
+   Producers throw at the call site; the service rejects bus events
+   that violate it before any notification is built.
+3. The preference check happens before persistence and before any
+   channel is called. Suppressed notifications are never stored or
    sent.
-3. Only formatters know message wording and recipient rules. The
-   service is generic over event types.
-4. A failing channel or client never stops other channels or
-   crashes the event bus (errors are isolated and logged).
-5. `src/domain` has no dependencies on other `src/` folders.
-6. Concrete adapters are created only in `composition.ts`
-   (and in tests).
+4. Only formatters know message wording and recipient rules.
+5. A failing channel, bus handler, dispatch listener or individual
+   notification (sync throw or rejection) never stops the others and
+   never surfaces to the publisher. Every channel send has a timeout.
+6. `sent` means delivered to a live client by at least one channel.
+   An offline recipient is `offline`, not `sent`.
+7. Concrete classes are instantiated only in composition roots
+   (`composition.ts`, `server/createServer.ts`, `demo.ts`) and tests.
+8. The core never imports from `src/server`.

@@ -1,162 +1,238 @@
 # Design Notes
 
-This document explains why the system is built the way it is, what
-was traded off, and what extending it would involve.
+Why the system is built the way it is, what it trades off, and what
+extending it actually takes. Every claim here is backed by code or a
+test. Known gaps are listed in §6.
 
-## 1. Goals that shaped the design
+## 1. Goals
 
-1. **Producers must not know about notifications.** The game engine
-   should not change when we add a channel or a new wording.
-2. **Adding an event type should be local.** One file plus one
-   registry entry.
-3. **Every external dependency is swappable.** That covers delivery
-   client, storage and transport. The brief explicitly says to mock
-   the client, so the boundary exists anyway. We use it everywhere.
-4. **Keep it small enough to defend line by line.** No DI container,
-   no framework magic.
+1. **Producers don't know about notifications.** Gameplay code calls
+   `gameEngine.playerLeveledUp(1, 15)` and nothing else.
+2. **Event-specific logic lives in one place.** Wording, recipients
+   and category sit in the event's formatter. The pipeline is generic.
+3. **Untrusted input stops at the edge of the core, by one rule.**
+   Producers reject malformed payloads and unknown players or items
+   to the caller. The service re-applies the same reference check to
+   anything arriving on the bus.
+4. **Failures stay local.** One broken channel, handler or observer
+   cannot stop the others.
+5. **Small enough to defend line by line.** No DI container and no
+   framework magic.
 
-## 2. Patterns and why
+## 2. Patterns
 
-| Pattern                         | Where                                          | Why                                                                                                   |
-| ------------------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| Event-driven / Observer         | `EventBus`, producers, `service.listenTo(bus)` | Decouples emitters from consumers. Other consumers (analytics, achievements) can subscribe later.    |
-| Strategy + Registry             | `formatters/*`, `NotificationFactory`          | Event-specific logic sits in one place. The service is closed for modification.                      |
-| Ports & Adapters (hexagonal)    | `PreferenceStore`, `NotificationRepository`, `NotificationChannel`, `NotificationClient`, `EventBus` | Swap in-memory for Postgres/Redis/Kafka/APNs without touching business logic. Tests use fakes. |
-| Pipeline / orchestrator         | `NotificationService.handle`                   | One readable sequence: create → gate → persist → fan out.                                             |
-| Composition root (manual DI)    | `composition.ts`, `server/createServer.ts`     | All wiring is explicit and in one place, which suits a codebase this size better than a container.   |
-| Discriminated unions            | `DomainEvent`, `FormatterRegistry`             | A missing formatter or a misspelt field is a compile error, not a runtime bug.                       |
+| Pattern                       | Where                                                        | Why                                                                                    |
+| ----------------------------- | ------------------------------------------------------------ | -------------------------------------------------------------------------------------- |
+| Event-driven / Observer       | `EventBus`, producers, `service.listenTo(bus)`               | Producers and consumers are decoupled. More consumers (analytics, achievements) can subscribe. |
+| Strategy + typed registry     | `notifications/formatters/*`, `NotificationFactory`          | One file per event. `FormatterRegistry` is a mapped type, so a missing formatter fails to compile. |
+| Ports & adapters              | `PreferenceStore`, `NotificationRepository`, `NotificationChannel`, `NotificationClient`, `EventBus`, `PlayerLookup`, `ItemLookup` | Adapters can be swapped and tests use fakes. Store ports are async so a database adapter fits. |
+| Schema as single source       | `domain/eventSchemas.ts`                                     | Producers and HTTP validate with the same schemas. `satisfies` ties each schema to its TS type. `EVENT_REFERENCES` declares each event's player and item fields explicitly, typed against the event so a misspelt field fails to compile. |
+| Value object                  | `Notification`                                               | Immutable. Read state changes replace the stored value, so no reference can mutate the inbox. |
+| Idempotent consumer           | Notification id = `eventId:type:recipient`, `save()` returns false on a repeat | A redelivered event (normal with brokers) produces no second notification, within the dedupe window (§6). |
+| Composition roots             | `composition.ts`, `server/createServer.ts`, `demo.ts`        | Wiring is explicit, and `NotificationSystem` exposes ports, not concrete stores. |
 
-### Why formatters decide recipients
+## 3. Key decisions
 
-Recipient rules are event-specific. Friend-accepted notifies the
-*requester*, not the actor, and PvP notifies the *victim*. Putting
-them next to the wording keeps everything about one event in one
-file. The service stays generic, so it is easy to test.
+**Formatters decide recipients.** Friend-accepted notifies the
+*requester*, and PvP notifies the *victim*. Keeping that next to the
+wording puts everything about one event in one file.
 
-### Why check preferences before persisting
+**Preferences are checked before persistence.** A disabled category
+is the player's choice, so storing the notification anyway would
+resurface it in the inbox. Suppressions are reported through
+`onDispatch`.
 
-A disabled category means the player chose not to be bothered.
-Storing the notification anyway would resurface it in the inbox and
-break that choice. Suppressions are logged and exposed through
-`onDispatch`, which is where metrics would hook in.
+**Every notification gets exactly one outcome.** Clients report what
+happened (`delivered` or `recipient-offline`), and the service
+combines the channels' answers:
 
-### Why category-level preferences
+- `sent`: at least one channel delivered it to a live client.
+- `offline`: accepted, but the player has no connection. It is
+  replayed from the inbox on connect.
+- `undelivered`: every channel failed or timed out. It is still
+  stored and replayed.
+- `suppressed`, `duplicates`, `failed` (processing threw), or the
+  whole event is `rejected` (unknown reference).
 
-The brief asks for category-level preferences explicitly ("Game
-Events", "Social Events"). Categories are a closed union
-(`NOTIFICATION_CATEGORIES`), and each formatter declares its
-category, so adding per-type preferences later is additive (see §4).
+Metrics built on `onDispatch` can therefore count real deliveries.
 
-## 3. Tradeoffs
+**One validation rule, two enforcement points.** Shape is checked by
+`parseEventPayload`, and references (players *and* items) by
+`findUnknownReferences`. Producers apply both and **throw
+synchronously**, so `playerLeveledUp(1, -5)`,
+`friendRequestSent(999, 1)` and `itemAcquired(2, "SwordOfAzerot")`
+all fail the same way, at the call site, and publish nothing.
+Synchronous rather than a rejected promise on purpose: the brief calls
+producers fire-and-forget, and an un-awaited rejection would crash
+the Node process. The
+service applies the same reference check again because the bus may
+carry events from publishers other than our producers. The HTTP
+harness does no validation of its own; it maps the producers' errors
+to 400/404.
 
-| Decision                                   | Benefit                                                  | Cost / risk                                                                 | When to revisit                         |
-| ------------------------------------------ | -------------------------------------------------------- | --------------------------------------------------------------------------- | --------------------------------------- |
-| In-process event bus                       | Zero infrastructure, synchronous to test                 | Events are lost on crash; single process only; no replay                    | Multiple instances, or events from other services |
-| `publish()` awaits handlers                | Demo, tests and HTTP can observe outcomes deterministically | A slow handler delays the publisher                                       | Move to a queue so producers fire and forget |
-| In-memory stores                           | Simple, fast, no setup for reviewers                     | Data is lost on restart; memory grows (inbox capped at 100 per player)      | Any real deployment                     |
-| At-most-once real-time push + inbox        | Simple; the inbox covers offline players                 | A socket can drop a message mid-flight. The client then relies on inbox re-sync on reconnect. | Add acks / sequence numbers per client |
-| Formatters as plain objects                | No class boilerplate; easy to test                       | Wording is hard-coded English                                               | i18n (see §4)                           |
-| Express + `ws`                             | Ubiquitous and well understood                           | Fewer built-ins than e.g. Socket.IO (rooms, auto-reconnect)                 | If client features grow                 |
-| No auth                                    | Out of scope; keeps the demo frictionless                | Anyone can connect as any player                                            | Before anything is exposed publicly     |
+**Failures are contained at every fan-out.**
 
-## 4. "What would it take to…" scenarios
+- **Per channel:** isolated with `allSettled`, and each send is
+  bounded by a timeout (default 5 s), so a hung push/email adapter
+  counts as failed instead of freezing the pipeline.
+- **Per notification:** each notification an event produces is
+  processed in its own `try/catch`, so a failing preference lookup
+  or inbox write for one recipient doesn't cost the others theirs.
+- **Per listener and per bus handler:** isolated too.
 
-**Add a new event type (for example Guild Invite).**
-Add a member to the `DomainEvent` union, then a formatter in
-`formatters/socialFormatters.ts`. TypeScript now flags
-`DEFAULT_FORMATTERS` until you register it. Then add a producer
-method and, for the demo, a zod schema entry. The service, channels
-and preferences do not change.
+**The bus contract is "accepted", not "processed".** `publish`
+resolves once the event is queued, which is what Kafka, SQS or Redis
+Streams can promise. The in-memory bus dispatches on a later
+macrotask, one event at a time in publish order. `drain()` exists
+only on the in-memory class, for tests, the CLI demo and shutdown.
+The HTTP harness returns `202 Accepted` for the same reason.
+Sequential dispatch keeps per-player ordering simple. The channel
+timeout bounds how long one notification can hold up the queue.
 
-**Add push notifications or email.**
-Implement `NotificationChannel` (for example a `PushChannel` wrapping
-APNs/FCM) and pass it in `extraChannels` in `composition.ts`. Failure
-isolation already exists. Next steps: per-channel preferences (the
-`PreferenceStore` key becomes `(category, channel)`), and only
-sending push when the player is offline, by asking the hub for the
-connection count.
+**Bounded inbox.** A FIFO capped at 100 per player. Replay on
+connect sends the whole inbox, and the unread count is computed over
+the same window. The demo page trims its list to the same capacity,
+so list and badge cannot disagree. The cost: once a player exceeds
+100, the oldest notifications are dropped even if unread (see §6).
 
-**Per-event-type preferences ("mute PvP but keep level ups").**
-Extend the store to
-`{ categories: Record<Category, boolean>, types?: Partial<Record<NotificationType, boolean>> }`
-and change `isEnabled(userId, category)` to
-`isEnabled(userId, notification)`, where a type override beats its
-category. It is a one-line change in the service and the formatters
-stay the same.
+**Replay vs live race.** A connection is registered *before* its
+inbox is loaded, so nothing published meanwhile is missed. Live
+pushes are buffered until the welcome message is sent, and buffered
+pushes the replay already contains are dropped by notification id.
+The client also renders idempotently by id.
 
-**Quiet hours / do-not-disturb.**
-Add a policy step between the preference check and delivery. Store
-the notification as usual but defer the push (or send it silently).
-This suggests turning the gate into a list of `DeliveryPolicy`
-objects (`preferences`, `quietHours`, `rateLimit`) that each return
-`allow | suppress | defer`.
+**Activity feed is an operator channel.** Dispatch outcomes go to
+`/ws/activity` only, never to player sockets, and it can be switched
+off (`ACTIVITY_FEED=off`). Cross-origin WebSocket upgrades are
+refused, so a different web page cannot connect.
 
-**Batching / digests ("Bob and 4 others followed you").**
-Introduce an aggregation step keyed by `(recipient, type)` with a
-short window, implemented as a decorator around the channel or a
-scheduled job reading the inbox. Formatters gain a `formatBatch`
-method.
+## 4. Tradeoffs
 
-**Rate limiting / spam (a player spamming friend requests).**
-A `DeliveryPolicy` with a per-(sender, recipient) token bucket. This
-belongs in the social system too, but the notification layer should
-defend itself.
+| Decision                        | Benefit                                         | Cost / risk                                                          |
+| ------------------------------- | ----------------------------------------------- | -------------------------------------------------------------------- |
+| In-process bus                  | Zero infrastructure                             | Events are lost on crash; single process only                        |
+| Sequential dispatch + timeout   | Simple ordering; a hung channel is cut off      | A slow channel still delays later events by up to the timeout per notification. The real fix is a queue per channel (§5) |
+| In-memory stores                | No setup for reviewers                          | Data is lost on restart                                              |
+| Sync catalog ports              | Formatters stay synchronous and simple          | A real user service needs a local read model/cache behind `PlayerLookup` |
+| Category-level preferences      | Exactly what the brief asks                     | No per-type or per-channel control yet (see §5)                      |
+| At-most-once push + inbox replay | Simple; offline players catch up on connect    | No per-message acks; a dropped socket relies on the replay           |
+| No auth                         | Out of scope; frictionless local demo           | Any local client can claim any `userId`                              |
 
-**Scale horizontally (many server instances).**
-1. Replace `InMemoryEventBus` with Kafka/SQS/Redis Streams behind
-   the `EventBus` interface. Consumers become a separate worker
-   service.
-2. Persist preferences and the inbox (Postgres, or Redis for hot
-   inbox data).
-3. Player sockets live on different nodes. Publish deliveries to
-   Redis pub/sub (or a channel per player), and each node's
-   `WebSocketHub` pushes to the sockets it holds. `PlayerMessenger`
-   is already the seam for this.
-4. Make handling idempotent by using the event id as the
-   notification id, so redeliveries from the broker do not duplicate
-   notifications.
+## 5. Extending it
 
-**Localisation.**
-Formatters return a message key plus params
-(`{ key: "levelUp", params: { level: 15 } }`) instead of a string.
-The client, or a render step that knows the player's locale,
-produces the text.
+**Add an event type (e.g. Guild Invite).**
 
-**Guaranteed delivery.**
-Give each client a cursor (the last seen notification id or a
-sequence number). On reconnect, the hub sends everything after the
-cursor instead of the latest 50. The client acks pushes.
+1. Add the event interface to the `DomainEvent` union
+   (`domain/events.ts`).
+2. Add its schema to `EVENT_PAYLOAD_SCHEMAS` and its player/item
+   fields to `EVENT_REFERENCES`. Both are compile errors until you do.
+3. Add a `NotificationType` member if it is a new kind of
+   notification.
+4. Add a formatter file and register it in `DEFAULT_FORMATTERS`.
+   Compile error until you do.
+5. Add a producer method for the subsystem that emits it.
 
-## 5. Failure handling
+The service, preferences, inbox, channels and HTTP validation need no
+change. In the demo harness only, the `emit()` switch in `http.ts`
+fails to compile until a case is added, and the page's `EVENTS` /
+`ICONS` tables need an entry to offer it in the form.
 
-| Failure                         | Behavior                                                                                   |
-| ------------------------------- | ------------------------------------------------------------------------------------------ |
-| A channel/client throws         | Logged with channel, notification and user. Other channels still deliver (`allSettled`).  |
-| An event handler throws         | Logged by the bus. Other handlers still run, and the publisher never sees the error.      |
-| Recipient offline               | Notification stays in the inbox and is replayed in the `welcome` message on connect.      |
-| Dead TCP connection             | 30 s ping/pong heartbeat terminates it and removes it from the player's socket set.       |
-| Bad HTTP input / unknown player | 400 / 404 with `{ error: { message, details } }`. Nothing is published.                  |
-| Unknown item id                 | Treated as common, so no notification.                                                     |
-| Unknown player name             | Fallback `Player #<id>`, so a missing profile never blocks a notification.                |
+**Swap in a database.** Implement `PreferenceStore` and
+`NotificationRepository` (already async) and wire them in
+`composition.ts`. The in-memory versions don't handle these, so a
+database adapter must:
 
-## 6. Likely questions
+- Make `save` a single insert on a unique notification id, which
+  keeps idempotency.
+- Do capacity eviction in the same transaction, or as a background
+  job.
+- Page `listFor` instead of returning the whole inbox.
+- Handle errors. A failed save currently fails the event's handler,
+  and the bus logs it. With a broker, that becomes a retry.
 
-- **Why not call the notification service directly from the game
-  engine?** That couples gameplay code to notification concerns. It
-  also blocks other consumers and makes moving to a broker a rewrite
-  instead of an adapter swap.
-- **Why is `publish` async and awaited?** It makes outcomes
-  observable in tests, the demo and HTTP responses. In production the
-  producer would publish to a broker and return immediately.
-- **How do you guarantee every event type is handled?**
-  `FormatterRegistry` is a mapped type over `EventType`, so a missing
-  key fails `tsc`.
-- **What happens if a player has two tabs open?** The hub keeps a
-  `Set<WebSocket>` per player and pushes to every open one.
-- **Where would you add metrics?** `service.onDispatch` (sent and
-  suppressed counts per type) plus the error logs from channels and
-  the bus.
-- **How is this tested?** Unit tests per formatter and store, service
-  tests with a recording client and a deliberately failing channel,
-  an end-to-end test through the real composition root, and HTTP + WS
-  tests against a server on a random port.
+**Use a broker.** Implement `EventBus` over Kafka/SQS. Run the
+notification service as a consumer. The idempotent save already
+handles redelivery. Per-player ordering requires partitioning by
+recipient.
+
+**Scale the WebSocket tier.** Sockets live on different nodes.
+Publish deliveries to Redis pub/sub keyed by player, and have each
+node's `WebSocketHub` push to the sockets it holds.
+`PlayerMessenger` is the seam for this.
+
+**Push or email channel.** Implement `NotificationChannel` (resolve
+`delivered` or `recipient-offline`) and pass it in `extraChannels`.
+Failure isolation, the timeout and the outcome accounting already
+apply. For slow providers, put a queue per channel behind the
+adapter, so the pipeline only waits for the enqueue. Per-channel
+preferences would extend the `PreferenceStore` key to
+`(category, channel)`.
+
+**Per-type preferences, quiet hours, rate limits, digests.** Turn the
+single preference check into a list of delivery policies that each
+return `allow | suppress | defer`. Digests ("Bob and 4 others
+followed you") need an aggregation step keyed by
+`(recipient, type)` with a time window.
+
+## 6. Known limits
+
+- The inbox drops the oldest notifications past 100 per player,
+  including unread ones. A real store would archive or paginate.
+- Duplicate detection remembers the last 10,000 notification ids
+  across all players (independent of inbox eviction). An event
+  redelivered after that window would notify again. A database
+  adapter would use a unique constraint, which has no window.
+- `playerLeveledUp` doesn't check that the level is actually new
+  (higher than before). The game engine owns level state, and the
+  notification layer has none.
+- `friendRequestAccepted(1, 3)` notifies player 3 without checking
+  that a request was ever sent. The social system owns friendship
+  state; the notification layer trusts its events.
+- The channel timeout bounds channels only. A hung preference store
+  or inbox would still hold the queue; a database adapter would set
+  its own query timeouts.
+- Ten distinct follow actions are ten events and ten notifications.
+  Deduplicating *semantic* repeats (unfollow/refollow spam) belongs in
+  the social system or a digest policy. The notification layer only
+  deduplicates *redelivered* events.
+- No authentication or per-message acknowledgement in the harness.
+- English-only wording in formatters. i18n would return a message key
+  plus params and render per locale.
+
+## 7. Failure handling
+
+| Failure                                      | Behavior                                                                     |
+| -------------------------------------------- | ---------------------------------------------------------------------------- |
+| Malformed producer input                     | `InvalidEventError` thrown synchronously at the call site, nothing published; HTTP 400 |
+| Unknown player or item (e.g. an item-id typo) | `UnknownReferenceError` thrown synchronously, nothing published; HTTP 404   |
+| Un-awaited producer call whose publish fails | No unhandled rejection (a handler is attached); awaiting callers still see it |
+| Unknown reference arriving on the bus anyway | Service rejects the event before formatting and logs it                       |
+| Same event delivered twice                   | Second save returns false; reported as a duplicate, nothing sent             |
+| Channel throws (sync), rejects or hangs      | Logged (hangs cut off by the timeout); other channels still run; `undelivered` if none succeeded |
+| Recipient not connected                      | `offline`; stored and replayed on connect                                    |
+| Preference store or inbox throws for one notification | That notification is `failed`; the event's other notifications proceed |
+| Dispatch listener throws                     | Logged; other listeners run; delivery unaffected                             |
+| Bus handler throws                           | Logged; other handlers run; the publisher never sees it                      |
+| Malformed WebSocket frame                    | That socket is dropped and logged; the server keeps running                  |
+| Client stops answering pings                 | Terminated on the next heartbeat sweep                                       |
+| Cross-origin WebSocket upgrade               | 403                                                                          |
+| Body over 10 kB / malformed JSON             | 413 / 400                                                                    |
+| Port already in use                          | Clear message, exit code 1                                                   |
+
+## 8. Scope
+
+The brief asks to focus on the required features and welcomes extras
+once those are complete. The core (event handling, preferences,
+notification creation and dispatch, the example triggers in
+`npm run demo`) was finished and verified first. The HTTP/WebSocket
+harness and demo page came after, live in `src/server` and `public/`,
+and can be deleted without touching the core.
+
+The core's abstractions each answer a stated requirement:
+
+- **Ports** answer "mock the delivery mechanism" and "flexibility as
+  the system grows".
+- **The formatter registry** answers "determine the type of
+  notification".
+- **The injectable producer clock** exists so tests get deterministic
+  event ids and times.

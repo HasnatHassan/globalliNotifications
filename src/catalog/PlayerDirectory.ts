@@ -5,8 +5,19 @@ export interface Player {
   readonly name: string;
 }
 
-/** Read-only lookup of player display names (stands in for the platform's user service). */
-export class PlayerDirectory {
+/**
+ * Port: read-only player reference data. Synchronous by design: this is
+ * cached reference data (a real system would keep a local read model of the
+ * user service), not a store the notification pipeline writes to.
+ */
+export interface PlayerLookup {
+  exists(id: PlayerId): boolean;
+  /** Display name. Callers reject unknown players first; the fallback is only a safety net. */
+  nameOf(id: PlayerId): string;
+  list(): Player[];
+}
+
+export class PlayerDirectory implements PlayerLookup {
   readonly #players: Map<PlayerId, Player>;
 
   constructor(players: readonly Player[]) {
@@ -17,9 +28,8 @@ export class PlayerDirectory {
     return this.#players.has(id);
   }
 
-  /** Display name, or a neutral fallback so a missing profile never blocks a notification. */
   nameOf(id: PlayerId): string {
-    return this.#players.get(id)?.name ?? `Player #${id}`;
+    return this.#players.get(id)?.name ?? `#${id}`;
   }
 
   list(): Player[] {

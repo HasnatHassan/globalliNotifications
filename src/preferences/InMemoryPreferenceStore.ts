@@ -2,7 +2,7 @@ import { NOTIFICATION_CATEGORIES, type NotificationCategory } from "../domain/ca
 import type { PlayerId } from "../domain/types.js";
 import type { CategoryPreferences, PreferenceStore } from "./PreferenceStore.js";
 
-/** Opt-out model: players without saved preferences receive every category. */
+/** Every category is enabled until the player turns it off. */
 const DEFAULT_PREFERENCES: CategoryPreferences = Object.fromEntries(
   NOTIFICATION_CATEGORIES.map((c) => [c, true]),
 ) as CategoryPreferences;
@@ -11,17 +11,22 @@ const DEFAULT_PREFERENCES: CategoryPreferences = Object.fromEntries(
 export class InMemoryPreferenceStore implements PreferenceStore {
   readonly #prefs = new Map<PlayerId, CategoryPreferences>();
 
-  get(playerId: PlayerId): CategoryPreferences {
+  async get(playerId: PlayerId): Promise<CategoryPreferences> {
     return { ...DEFAULT_PREFERENCES, ...this.#prefs.get(playerId) };
   }
 
-  update(playerId: PlayerId, changes: Partial<CategoryPreferences>): CategoryPreferences {
-    const next = { ...this.get(playerId), ...changes };
+  async update(playerId: PlayerId, changes: Partial<CategoryPreferences>): Promise<CategoryPreferences> {
+    const next = await this.get(playerId);
+    // Runtime guard as well as the type: a stray `undefined` must never become a stored preference.
+    for (const category of NOTIFICATION_CATEGORIES) {
+      const value: unknown = changes[category];
+      if (typeof value === "boolean") next[category] = value;
+    }
     this.#prefs.set(playerId, next);
     return { ...next };
   }
 
-  isEnabled(playerId: PlayerId, category: NotificationCategory): boolean {
-    return this.get(playerId)[category];
+  async isEnabled(playerId: PlayerId, category: NotificationCategory): Promise<boolean> {
+    return (await this.get(playerId))[category];
   }
 }

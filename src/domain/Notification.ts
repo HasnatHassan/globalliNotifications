@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import type { NotificationCategory } from "./categories.js";
 import type { PlayerId } from "./types.js";
 
@@ -16,12 +15,15 @@ export type NotificationType =
 export type NotificationMetadata = Readonly<Record<string, string | number | boolean>>;
 
 export interface NotificationProps {
+  readonly id: string;
   readonly userId: PlayerId;
   readonly type: NotificationType;
   readonly category: NotificationCategory;
   readonly title: string;
   readonly message: string;
+  readonly createdAt: Date;
   readonly metadata?: NotificationMetadata;
+  readonly read?: boolean;
 }
 
 /** Wire format sent to clients and returned by the API. */
@@ -39,7 +41,11 @@ export interface NotificationDTO {
 
 /**
  * The challenge says a Notification class is "provided" but none was given,
- * so this is our own version of it. It is immutable except for read state.
+ * so this is our own version of it.
+ *
+ * Immutable value object: changing read state returns a new instance, so the
+ * repository is the only place state changes, and nothing holding a
+ * reference (a channel, a caller of listFor) can alter what is stored.
  */
 export class Notification {
   readonly id: string;
@@ -48,31 +54,25 @@ export class Notification {
   readonly category: NotificationCategory;
   readonly title: string;
   readonly message: string;
-  readonly metadata: NotificationMetadata;
   readonly createdAt: Date;
-  #read = false;
+  readonly metadata: NotificationMetadata;
+  readonly read: boolean;
 
-  constructor(props: NotificationProps, id: string = randomUUID(), createdAt: Date = new Date()) {
-    this.id = id;
+  constructor(props: NotificationProps) {
+    this.id = props.id;
     this.userId = props.userId;
     this.type = props.type;
     this.category = props.category;
     this.title = props.title;
     this.message = props.message;
-    this.metadata = props.metadata ?? {};
-    this.createdAt = createdAt;
+    this.createdAt = new Date(props.createdAt.getTime());
+    this.metadata = Object.freeze({ ...props.metadata });
+    this.read = props.read ?? false;
+    Object.freeze(this);
   }
 
-  get read(): boolean {
-    return this.#read;
-  }
-
-  markAsRead(): void {
-    this.#read = true;
-  }
-
-  markAsUnread(): void {
-    this.#read = false;
+  withReadState(read: boolean): Notification {
+    return read === this.read ? this : new Notification({ ...this, read });
   }
 
   toJSON(): NotificationDTO {
@@ -85,7 +85,7 @@ export class Notification {
       message: this.message,
       metadata: this.metadata,
       createdAt: this.createdAt.toISOString(),
-      read: this.#read,
+      read: this.read,
     };
   }
 }

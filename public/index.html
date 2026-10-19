@@ -235,11 +235,11 @@ async function fire(payload) {
 /* ---------- Player panes ---------- */
 
 class PlayerPane {
-  constructor(root, initialPlayerId, isActivitySource) {
+  constructor(root, initialPlayerId) {
     this.root = root;
-    this.isActivitySource = isActivitySource;
+    this.capacity = Infinity; // set from the server's welcome message
     this.socket = null;
-    this.items = new Map(); // notification id → { n, li }
+    this.items = new Map(); // notification id → { n, li }; the feed DOM is newest first
     this.select = $(".player-select", root);
     $(".mark-all", root).addEventListener("click", () => this.markAllRead());
     for (const p of state.players) this.select.append(el("option", { value: p.id, text: `${p.id} · ${p.name}` }));
@@ -299,10 +299,17 @@ class PlayerPane {
     item.addEventListener("click", () => { if (!n.read) this.setRead(n.id, true); });
     toggle.addEventListener("click", (e) => { e.stopPropagation(); this.setRead(n.id, !n.read); });
 
+    item.dataset.id = n.id;
     this.items.set(n.id, { n, li: item });
     this.applyReadState(n.id, n.read);
     const feed = $(".feed", this.root);
     live ? feed.prepend(item) : feed.append(item);
+    // Mirror the server's bounded FIFO inbox so the list and the unread badge match it.
+    while (this.items.size > this.capacity) {
+      const oldest = feed.lastElementChild;
+      this.items.delete(oldest.dataset.id);
+      oldest.remove();
+    }
   }
 
   applyReadState(id, read) {
@@ -378,6 +385,7 @@ class PlayerPane {
       if (this.socket !== socket) return; // ignore a replaced socket (player switch / reconnect)
       const { type, data } = JSON.parse(msg.data);
       if (type === "welcome") {
+        this.capacity = data.capacity;
         data.history.forEach((n) => this.renderNotification(n, { live: false }));
         this.setUnreadCount(data.unread);
       }
@@ -391,7 +399,6 @@ class PlayerPane {
         ids.forEach((id) => this.applyReadState(id, data.read));
         this.setUnreadCount(data.unread);
       }
-      if (type === "activity" && this.isActivitySource) renderActivity(data);
     };
   }
 }
@@ -408,18 +415,43 @@ function describeEvent(event) {
   return `${def.label} (${args.join(", ")})`;
 }
 
-function renderActivity({ at, event, sent, suppressed }) {
-  const parts = [el("span", { text: `${new Date(at).toLocaleTimeString()}  ${describeEvent(event)}  → ` })];
-  for (const s of sent) {
-    parts.push(el("span", { class: "tag-sent", text: `sent to ${nameOf(s.userId)}${s.online ? "" : " (offline, saved to inbox)"}  ` }));
+// Defaults keep the page working against a server that sends fewer fields.
+function renderActivity({ event, sent = [], offline = [], undelivered = [], suppressed = [], duplicates = 0, failed = [], rejected }) {
+  const parts = [el("span", { text: `${new Date(event.occurredAt).toLocaleTimeString()}  ${describeEvent(event)}  → ` })];
+  const tag = (cls, text) => parts.push(el("span", { class: cls, text: `${text}  ` }));
+  if (rejected) {
+    const refs = [...(rejected.players ?? []).map((p) => `player ${p}`), ...(rejected.items ?? []).map((i) => `item ${i}`)];
+    tag("tag-supp", `rejected: unknown ${refs.join(", ") || "reference"}`);
   }
-  for (const s of suppressed) {
-    parts.push(el("span", { class: "tag-supp", text: `suppressed for ${nameOf(s.userId)} (${s.category} off)  ` }));
-  }
-  if (sent.length === 0 && suppressed.length === 0) {
-    parts.push(el("span", { class: "tag-none", text: "no notification (filtered by rules)" }));
+  for (const s of sent) tag("tag-sent", `sent to ${nameOf(s.userId)}`);
+  for (const s of offline) tag("tag-none", `${nameOf(s.userId)} offline (saved to inbox)`);
+  for (const s of undelivered) tag("tag-supp", `delivery failed for ${nameOf(s.userId)} (saved to inbox)`);
+  for (const s of failed) tag("tag-supp", `processing failed for ${nameOf(s.userId)}`);
+  for (const s of suppressed) tag("tag-supp", `suppressed for ${nameOf(s.userId)} (${s.category} off)`);
+  if (duplicates > 0) tag("tag-none", `${duplicates} duplicate(s) ignored`);
+  if (!rejected && sent.length + offline.length + undelivered.length + suppressed.length + duplicates + failed.length === 0) {
+    tag("tag-none", "no notification (filtered by rules)");
   }
   $("#activity").prepend(el("li", {}, ...parts));
+}
+
+/** Operator stream of dispatch outcomes: its own socket, never mixed into player sockets. */
+function connectActivityFeed() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const socket = new WebSocket(`${proto}://${location.host}/ws/activity`);
+  let opened = false;
+  socket.onopen = () => { opened = true; };
+  socket.onmessage = (msg) => {
+    const { type, data } = JSON.parse(msg.data);
+    if (type === "activity") renderActivity(data);
+  };
+  socket.onclose = () => {
+    if (!opened) {
+      // Refused (feed disabled with ACTIVITY_FEED=off) or server down: say so, retry slowly.
+      $("#activity").replaceChildren(el("li", { class: "tag-none", text: "Activity feed unavailable." }));
+    }
+    setTimeout(connectActivityFeed, 5000);
+  };
 }
 
 /* ---------- Boot ---------- */
@@ -433,10 +465,11 @@ async function boot() {
   renderEventFields();
 
   const tpl = $("#pane-tpl");
-  [1, 3].forEach((playerId, i) => {
+  connectActivityFeed();
+  [1, 3].forEach((playerId) => {
     const node = tpl.content.firstElementChild.cloneNode(true);
     $("#panes").append(node);
-    panes.push(new PlayerPane(node, playerId, i === 0));
+    panes.push(new PlayerPane(node, playerId));
   });
 
   $("#event-form").addEventListener("submit", (e) => {

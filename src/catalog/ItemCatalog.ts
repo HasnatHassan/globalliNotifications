@@ -14,15 +14,26 @@ export function isNotifiableRarity(rarity: Rarity): boolean {
   return RARITIES.indexOf(rarity) >= RARITIES.indexOf(NOTIFIABLE_MIN_RARITY);
 }
 
+/** Port: read-only item reference data (cached, hence synchronous; see PlayerLookup). */
+export interface ItemLookup {
+  has(id: string): boolean;
+  /** Callers reject unknown ids first; the common-item fallback is only a safety net. */
+  get(id: string): Item;
+  list(): Item[];
+}
+
 /** Read-only item metadata (stands in for the game's item database). */
-export class ItemCatalog {
+export class ItemCatalog implements ItemLookup {
   readonly #items: Map<string, Item>;
 
   constructor(items: readonly Item[]) {
     this.#items = new Map(items.map((i) => [i.id, i]));
   }
 
-  /** Unknown ids are treated as common items so they never trigger a notification. */
+  has(id: string): boolean {
+    return this.#items.has(id);
+  }
+
   get(id: string): Item {
     return this.#items.get(id) ?? { id, name: id, rarity: "common" };
   }
