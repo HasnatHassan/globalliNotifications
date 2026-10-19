@@ -110,6 +110,35 @@ describe("real-time delivery over WebSocket", () => {
     cara.ws.close();
   });
 
+  it("delivers each notification exactly once per connection, even for parallel events and multiple tabs", async () => {
+    const tab1 = await connect(2);
+    const tab2 = await connect(2);
+    await tab1.waitFor((m) => m.type === "welcome");
+    await tab2.waitFor((m) => m.type === "welcome");
+
+    await Promise.all([
+      post("/api/events", { type: "NEW_FOLLOWER", followerId: 1, followedId: 2 }),
+      post("/api/events", { type: "NEW_FOLLOWER", followerId: 3, followedId: 2 }),
+      post("/api/events", { type: "PLAYER_ATTACKED", attackerId: 4, victimId: 2 }),
+    ]);
+    // Wait for all three activity entries, then let any stray duplicates arrive.
+    const deadline = Date.now() + 1000;
+    while (tab1.messages.filter((m) => m.type === "activity").length < 3 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    await new Promise((r) => setTimeout(r, 50));
+
+    for (const tab of [tab1, tab2]) {
+      const ids = tab.messages.filter((m) => m.type === "notification").map((m) => m.data.id);
+      expect(ids).toHaveLength(3);
+      expect(new Set(ids).size).toBe(3);
+    }
+    const activity = tab1.messages.find((m) => m.type === "activity");
+    expect(activity?.data.event).toMatchObject({ type: expect.any(String) });
+    tab1.ws.close();
+    tab2.ws.close();
+  });
+
   it("marks notifications read/unread and syncs read state to the player's sockets", async () => {
     await post("/api/events", { type: "PLAYER_LEVELED_UP", playerId: 4, newLevel: 2 });
     await post("/api/events", { type: "PLAYER_LEVELED_UP", playerId: 4, newLevel: 3 });

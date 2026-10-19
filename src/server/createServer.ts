@@ -25,6 +25,7 @@ export async function startServer(port: number, logger: Logger = consoleLogger):
       data: {
         eventType: event.type,
         at: event.occurredAt.toISOString(),
+        event,
         sent: sent.map((n) => ({ userId: n.userId, type: n.type, online: hub.connectionCount(n.userId) > 0 })),
         suppressed,
       },

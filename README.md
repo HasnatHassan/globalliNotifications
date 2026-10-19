@@ -23,7 +23,7 @@ Requires **Node.js 20+** (developed on Node 25; `.nvmrc` pins 22).
 ```bash
 npm install
 npm run build
-npm test          # 33 unit + integration tests
+npm test          # 34 unit + integration tests
 npm run demo      # CLI walkthrough of the brief's example triggers
 npm start         # live demo → http://localhost:3000  (PORT=xxxx to change)
 ```
@@ -66,6 +66,10 @@ Open http://localhost:3000. The page shows two players side by side
 - The **Game / Social** toggles change that player's preferences.
   Turn Social off for Alice and send another friend request: the
   activity log shows it as *suppressed*, and nothing reaches her feed.
+- The **System activity** log lists every event with the players
+  involved, for example "Friend request sent (From: Cara, To: Alice)",
+  and what it produced. The server state is shared, so events fired
+  from another open tab of the demo appear here too.
 - **Read / unread.** New notifications are highlighted with a dot,
   and each pane shows an unread badge. Click a notification to mark
   it read, use its **Mark read / Mark unread** button to toggle it,

@@ -36,7 +36,15 @@ Update this file after every meaningful implementation change.
   demo page has an unread highlight, a per-item toggle,
   click-to-read, an unread badge and "Mark all read".
 
-Status: 33 tests passing, `tsc` strict clean, `npm run demo` and
+- Fix: "duplicate / unexpected notifications" in the demo. The server
+  was confirmed exactly-once per connection (regression test). Page
+  hardening: render idempotently by notification id; animate only
+  live arrivals (inbox replay used to look like new notifications);
+  ignore messages from replaced sockets; block double-submit of
+  publish buttons; the activity log names the event and its players;
+  warn when both panes show the same player.
+
+Status: 34 tests passing, `tsc` strict clean, `npm run demo` and
 `npm start` verified; the browser demo was checked manually end to
 end.
 

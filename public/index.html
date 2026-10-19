@@ -64,7 +64,8 @@
   .feed { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; max-height: 420px; overflow-y: auto; }
   .feed:empty::after { content: "No notifications yet."; color: var(--text-muted); font-size: 13px; }
   .note { display: grid; grid-template-columns: 28px 1fr; gap: 8px; padding: 10px 12px; background: var(--bg-raised);
-    border-radius: var(--radius-sm); border-left: 3px solid var(--cat-game); animation: slide .25s ease-out; }
+    border-radius: var(--radius-sm); border-left: 3px solid var(--cat-game); }
+  .note.live { animation: slide .25s ease-out; }
   .note.SOCIAL { border-left-color: var(--cat-social); }
   .note { position: relative; grid-template-columns: 28px 1fr auto; cursor: pointer; }
   .note.unread { background: var(--bg-unread); }
@@ -167,6 +168,7 @@ const BRIEF_EXAMPLES = [
 ];
 
 const state = { players: [], items: [] };
+const panes = [];
 const $ = (sel, root = document) => root.querySelector(sel);
 const nameOf = (id) => state.players.find((p) => p.id === id)?.name ?? `#${id}`;
 
@@ -254,7 +256,9 @@ class PlayerPane {
   }
 
   async renderPreferences() {
-    const prefs = await api(`/api/players/${this.playerId}/preferences`);
+    const playerId = this.playerId;
+    const prefs = await api(`/api/players/${playerId}/preferences`);
+    if (playerId !== this.playerId) return; // pane switched player while loading
     const box = $(".toggles", this.root);
     box.replaceChildren();
     for (const [category, enabled] of Object.entries(prefs)) {
@@ -275,9 +279,14 @@ class PlayerPane {
     }
   }
 
-  renderNotification(n, prepend = true) {
+  renderNotification(n, { live }) {
+    // Idempotent by id: a notification seen twice (replay, retry) is rendered once.
+    if (this.items.has(n.id)) {
+      this.applyReadState(n.id, n.read);
+      return;
+    }
     const toggle = el("button", { type: "button", class: "read-toggle" });
-    const item = el("li", { class: `note ${n.category}` },
+    const item = el("li", { class: `note ${n.category}${live ? " live" : ""}` },
       el("span", { class: "icon", "aria-hidden": "true", text: ICONS[n.type] ?? "🔔" }),
       el("div", {},
         el("div", { class: "title", text: n.title }),
@@ -293,7 +302,7 @@ class PlayerPane {
     this.items.set(n.id, { n, li: item });
     this.applyReadState(n.id, n.read);
     const feed = $(".feed", this.root);
-    prepend ? feed.prepend(item) : feed.append(item);
+    live ? feed.prepend(item) : feed.append(item);
   }
 
   applyReadState(id, read) {
@@ -354,23 +363,26 @@ class PlayerPane {
     this.setUnreadCount(0);
     this.setStatus(false);
     this.renderPreferences().catch((err) => setHint(err.message, true));
+    warnIfSamePlayerTwice();
 
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const socket = new WebSocket(`${proto}://${location.host}/ws?userId=${this.playerId}`);
     this.socket = socket;
-    socket.onopen = () => this.setStatus(true);
+    socket.onopen = () => this.socket === socket && this.setStatus(true);
     socket.onclose = () => {
+      if (this.socket !== socket) return;
       this.setStatus(false);
       setTimeout(() => this.socket === socket && this.connect(), 2000); // simple reconnect
     };
     socket.onmessage = (msg) => {
+      if (this.socket !== socket) return; // ignore a replaced socket (player switch / reconnect)
       const { type, data } = JSON.parse(msg.data);
       if (type === "welcome") {
-        data.history.forEach((n) => this.renderNotification(n, false));
+        data.history.forEach((n) => this.renderNotification(n, { live: false }));
         this.setUnreadCount(data.unread);
       }
       if (type === "notification") {
-        this.renderNotification(data);
+        this.renderNotification(data, { live: true });
         this.recountUnread();
       }
       if (type === "read-state") {
@@ -384,8 +396,20 @@ class PlayerPane {
   }
 }
 
-function renderActivity({ eventType, at, sent, suppressed }) {
-  const parts = [el("span", { text: `${new Date(at).toLocaleTimeString()}  ${eventType}  → ` })];
+/** "Friend request sent (From: Cara, To: Alice)" from the raw event. */
+function describeEvent(event) {
+  const def = EVENTS[event.type];
+  if (!def) return event.type;
+  const itemName = (id) => state.items.find((i) => i.id === id)?.name ?? id;
+  const args = def.fields.map(([name, kind, label]) => {
+    const value = event[name];
+    return `${label}: ${kind === "player" ? nameOf(value) : kind === "item" ? itemName(value) : value}`;
+  });
+  return `${def.label} (${args.join(", ")})`;
+}
+
+function renderActivity({ at, event, sent, suppressed }) {
+  const parts = [el("span", { text: `${new Date(at).toLocaleTimeString()}  ${describeEvent(event)}  → ` })];
   for (const s of sent) {
     parts.push(el("span", { class: "tag-sent", text: `sent to ${nameOf(s.userId)}${s.online ? "" : " (offline, saved to inbox)"}  ` }));
   }
@@ -412,33 +436,54 @@ async function boot() {
   [1, 3].forEach((playerId, i) => {
     const node = tpl.content.firstElementChild.cloneNode(true);
     $("#panes").append(node);
-    new PlayerPane(node, playerId, i === 0);
+    panes.push(new PlayerPane(node, playerId, i === 0));
   });
 
-  $("#event-form").addEventListener("submit", async (e) => {
+  $("#event-form").addEventListener("submit", (e) => {
     e.preventDefault();
-    try {
-      await fire(readEventForm());
-      setHint("Event published.");
-    } catch (err) {
-      setHint(err.message, true);
-    }
+    runExclusive(async () => {
+      const payload = readEventForm();
+      await fire(payload);
+      setHint(`Published: ${describeEvent(payload)}.`);
+    });
   });
 
-  $("#run-brief").addEventListener("click", async (e) => {
-    e.target.disabled = true;
-    try {
+  $("#run-brief").addEventListener("click", () =>
+    runExclusive(async () => {
       for (const payload of BRIEF_EXAMPLES) {
         await fire(payload);
         await new Promise((r) => setTimeout(r, 400));
       }
-      setHint("Ran the 4 example triggers from the brief.");
-    } catch (err) {
-      setHint(err.message, true);
-    } finally {
-      e.target.disabled = false;
-    }
-  });
+      setHint("Ran the 4 example triggers from the brief. Running them again sends the same 4 notifications again.");
+    }),
+  );
+}
+
+/**
+ * Only one publish action at a time. A double-click or a held Enter key on
+ * "Fire event" would otherwise POST the same event twice, and two real
+ * notifications would follow.
+ */
+let busy = false;
+async function runExclusive(action) {
+  if (busy) return;
+  busy = true;
+  const buttons = [$("#event-form button[type=submit]"), $("#run-brief")];
+  buttons.forEach((b) => (b.disabled = true));
+  try {
+    await action();
+  } catch (err) {
+    setHint(err.message, true);
+  } finally {
+    busy = false;
+    buttons.forEach((b) => (b.disabled = false));
+  }
+}
+
+function warnIfSamePlayerTwice() {
+  if (panes.length === 2 && panes[0].playerId === panes[1].playerId) {
+    setHint(`Both panes are showing ${nameOf(panes[0].playerId)}, so each of their notifications appears twice on screen (one per connection).`);
+  }
 }
 
 boot().catch((err) => setHint(`Failed to load: ${err.message}`, true));
