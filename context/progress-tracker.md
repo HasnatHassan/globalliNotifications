@@ -4,16 +4,34 @@ Update this file after every meaningful implementation change.
 
 ## Current Phase
 
-- In progress
+- Complete; published to https://github.com/HasnatHassan/globalliNotifications
 
 ## Current Goal
 
-- Unit 1: Domain model and catalogs
+- Do a final fresh-clone check.
 
 ## Completed
 
 - Unit 0: Scaffold (git, package.json, strict tsconfig, vitest,
   context files, CLAUDE.md)
+- Unit 1: Domain (`Notification`, categories, `DomainEvent` union),
+  catalogs (players, items with rarity)
+- Unit 2: `PreferenceStore` port + in-memory map (opt-in by default)
+- Unit 3: One formatter per event type (8) + typed registry/factory;
+  rare+ item rule; self-targeted events skipped
+- Unit 4: `NotificationService` (create → gate → persist → fan out),
+  `InAppChannel`, console/recording clients, inbox repository,
+  channel error isolation, `onDispatch` hook
+- Unit 5: `InMemoryEventBus`, `GameEngine`/`SocialSystem` producers,
+  `composition.ts`, CLI demo
+- Unit 6: Express API + zod validation, `WebSocketHub` (per-player
+  sockets, heartbeat, inbox replay), activity feed, demo page
+- Unit 7: README, `docs/DESIGN.md`, `docs/AI_USAGE.md`; dependency
+  upgrades (0 audit findings)
+
+Status: 32 tests passing, `tsc` strict clean, `npm run demo` and
+`npm start` verified (the API was smoke-tested with curl; the page
+script was syntax-checked).
 
 ## In Progress
 
@@ -21,25 +39,23 @@ Update this file after every meaningful implementation change.
 
 ## Next Up
 
-1. Domain: `Notification`, categories, event union, catalogs
-2. Preferences store
-3. Formatters + factory
-4. Service + channels + clients + repository
-5. EventBus + producers + CLI demo
-6. HTTP + WebSocket server + demo page
-7. README, docs/DESIGN.md, docs/AI_USAGE.md, publish to GitHub
+- Manually check the browser demo end to end.
 
 ## Open Questions
 
+Each question is resolved with the assumption shown, and each
+assumption is documented in the README.
+
 - The brief says a `Notification` class is "provided", but none was
-  given. **Assumed:** we define it with the fields the brief implies
-  (id, userId, type, category, message, createdAt, metadata, read).
+  given. **Assumed:** we define it (id, userId, type, category,
+  title, message, metadata, createdAt, read).
 - Default preferences for a player with no saved settings.
-  **Assumed:** all categories are enabled (opt-out model).
+  **Assumed:** all categories enabled (opt-out model).
 - What counts as "rare or valuable"? **Assumed:** rarity `rare`,
-  `epic` or `legendary` in `ItemCatalog`. `common`/`uncommon` items
-  produce no notification. Unknown item ids are treated as
-  `common`.
+  `epic` or `legendary`. Common and unknown items produce no
+  notification.
+- Who is notified on PvP? **Assumed:** the victim or loser only.
+- Self-targeted social or PvP events. **Assumed:** no notification.
 
 ## Architecture Decisions
 
@@ -50,12 +66,19 @@ Update this file after every meaningful implementation change.
   broker.
 - **Formatter registry (Strategy).** The only place that knows
   wording and recipients, which keeps the service Open/Closed.
-- **Ports & adapters for preferences, inbox, channels and clients.**
-  The brief asks us to mock the delivery client, and the same
-  boundary makes testing trivial.
+- **Ports & adapters for preferences, inbox, channels, clients and
+  the bus.** The brief asks us to mock the delivery client, and the
+  same boundary makes testing trivial.
 - **Manual DI in `composition.ts`.** No framework to explain, and
   wiring stays explicit.
+- **Preference gate before persistence.** Disabled means not stored
+  and not sent.
+- **WebSocket hub configured through `attach(server, { isKnownPlayer, welcome })`.**
+  Avoids a construction cycle between the hub and the notification
+  system.
 
 ## Session Notes
 
 - Node 25 used locally. `.nvmrc` pins 22 and `engines` requires ≥20.
+- Dependencies are pinned exactly. express 4.22.3, ws 8.22.0, tsx
+  4.23.15 and vitest 4.1.11 were chosen to clear `npm audit`.

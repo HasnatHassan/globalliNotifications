@@ -9,7 +9,7 @@
 | HTTP       | Express 4                  | Demo REST API + static page                   |
 | Real-time  | `ws` 8                     | Push notifications to connected game clients  |
 | Validation | zod 3                      | Validate HTTP / WebSocket input at the edge   |
-| Tests      | Vitest 2                   | Unit + integration tests                      |
+| Tests      | Vitest 4                   | Unit + integration tests                      |
 | UI         | Vanilla HTML/CSS/JS        | One demo page with no build step (`public/`)  |
 
 ## Pipeline
@@ -45,8 +45,13 @@ Producer ──publish──▶ EventBus ──▶ NotificationService
   They only publish events and know nothing about notifications.
 - `src/composition.ts` — the only place that wires concrete
   classes together (manual dependency injection).
-- `src/server` — Express routes + WebSocket hub. A thin adapter
-  that calls producers and stores and holds no business rules.
+- `src/server` — demo delivery layer. `http.ts` (Express routes,
+  zod-validated, calls producers and stores), `WebSocketHub.ts`
+  (player id → sockets, heartbeat, `welcome` replay of the inbox),
+  `schemas.ts`, and `createServer.ts` (server-side wiring plus the
+  activity feed). No business rules live here.
+- `src/logger.ts` — `Logger` port with console and silent
+  implementations.
 - `src/demo.ts` — CLI walkthrough of the brief's example triggers.
 - `public/` — static demo page.
 
